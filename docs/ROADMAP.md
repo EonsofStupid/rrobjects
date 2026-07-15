@@ -1,5 +1,8 @@
 # Reason Ready — Roadmap
 
+> **The governing document is [PLAN.md](PLAN.md)** — the full capability
+> matrix and phase gates live there. This file tracks phase status only.
+
 Phased, measurable, each phase gated by the one before. Status: 🟢 done ·
 🟡 in progress · ⬜ planned.
 

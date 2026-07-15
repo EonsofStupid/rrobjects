@@ -88,9 +88,11 @@ cargo run --release --bin rrf-bench -- --docs 50000 --queries 500 --store estate
 
 ## Status
 
-Pre-release. The architecture and the end-to-end flow are real and running on
-default components; the DevPULSE model backends and best-in-class tuning are in
-active development.
+Pre-release. The architecture and the end-to-end flow are real, running, and
+**measured** (see `docs/BENCHMARKS.md`); the estate (RocksDB), hybrid recall,
+ingestion machine, event stream, and baseline gates are live. The full
+capability plan — ANN, graph relations, live queries, gRPC, the WASM plugin
+runtime, DevPULSE models — is phased with proof gates in **`docs/PLAN.md`**.
 
 ---
 © 2026 EonsofStupid — Reason Ready. Proprietary; see `LICENSE`.
