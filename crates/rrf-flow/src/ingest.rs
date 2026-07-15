@@ -163,12 +163,7 @@ async fn run_machine(
         // Harvest any finished batches without blocking.
         while let Some(done) = inflight.try_join_next() {
             if let Ok((indexed, errors, ms)) = done {
-                stats.indexed += indexed;
-                stats.errors += errors;
-                stats.batches += 1;
-                stats.last_batch_ms = ms;
-                let secs = started.elapsed().as_secs_f64().max(1e-9);
-                stats.docs_per_sec = stats.indexed as f64 / secs;
+                harvest(&mut stats, indexed, errors, ms, &started);
                 publish(phase, &stats, &status);
             }
         }
@@ -228,12 +223,7 @@ async fn run_machine(
         } else if !intake_open {
             // Nothing new to dispatch; wait for stragglers.
             if let Some(Ok((indexed, errors, ms))) = inflight.join_next().await {
-                stats.indexed += indexed;
-                stats.errors += errors;
-                stats.batches += 1;
-                stats.last_batch_ms = ms;
-                let secs = started.elapsed().as_secs_f64().max(1e-9);
-                stats.docs_per_sec = stats.indexed as f64 / secs;
+                harvest(&mut stats, indexed, errors, ms, &started);
                 publish(phase, &stats, &status);
             }
         }
@@ -243,7 +233,39 @@ async fn run_machine(
     let secs = started.elapsed().as_secs_f64().max(1e-9);
     stats.docs_per_sec = stats.indexed as f64 / secs;
     publish(phase, &stats, &status);
+    rrf_core::events::emit(
+        "ingest.finished",
+        serde_json::json!({
+            "received": stats.received,
+            "indexed": stats.indexed,
+            "errors": stats.errors,
+            "batches": stats.batches,
+            "docs_per_sec": stats.docs_per_sec,
+        }),
+    );
     stats
+}
+
+/// Fold one finished batch into the counters and emit the batch event —
+/// the single place batch completion is accounted, so the stream is
+/// consistent no matter which harvest site observed it.
+fn harvest(stats: &mut IngestStats, indexed: u64, errors: u64, ms: u64, started: &Instant) {
+    stats.indexed += indexed;
+    stats.errors += errors;
+    stats.batches += 1;
+    stats.last_batch_ms = ms;
+    let secs = started.elapsed().as_secs_f64().max(1e-9);
+    stats.docs_per_sec = stats.indexed as f64 / secs;
+    rrf_core::events::emit(
+        "ingest.batch",
+        serde_json::json!({
+            "indexed": indexed,
+            "errors": errors,
+            "batch_ms": ms,
+            "total_indexed": stats.indexed,
+            "docs_per_sec": stats.docs_per_sec,
+        }),
+    );
 }
 
 async fn index_batch(

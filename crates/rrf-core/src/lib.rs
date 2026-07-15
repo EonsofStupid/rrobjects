@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod events;
 pub mod text;
 pub mod traits;
 pub mod types;

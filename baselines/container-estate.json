@@ -1,0 +1,14 @@
+{
+  "config": {
+    "store": "estate",
+    "docs": 50000,
+    "queries": 500,
+    "batch": 256,
+    "concurrency": 4,
+    "top_k": 10
+  },
+  "recorded_at_ms": 1784147584614,
+  "ingest_docs_per_sec": 7280.9270421717265,
+  "query_p50_ms": 113.265,
+  "query_p95_ms": 120.944
+}

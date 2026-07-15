@@ -3,6 +3,8 @@
 //!
 //! Env:
 //! - `RRF_LISTEN` — a2a TCP address (e.g. `127.0.0.1:7878`); unset = disabled.
+//! - `RRF_ESTATE` — path to the persistent estate; unset = in-memory.
+//! - `RRF_EVENTS` — JSONL event-stream path (DuckDB-ready); unset = disabled.
 //! - `RUST_LOG`   — tracing filter (default `info`).
 
 use std::sync::Arc;
@@ -12,6 +14,14 @@ use rrf_flow::{estate_map, init_tracing, sample_corpus, serve, ReasonReadyFlow, 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
+
+    // The event stream: every meaningful transition, consistently emitted,
+    // straight into DuckDB via read_json_auto().
+    if let Ok(path) = std::env::var("RRF_EVENTS") {
+        let sink = rrf_core::events::JsonlSink::open(&path)?;
+        rrf_core::events::set_sink(Box::new(sink));
+        tracing::info!(path, "event stream enabled (JSONL)");
+    }
 
     // With RRF_ESTATE set, memory is the persistent kvs estate (hybrid
     // dense + lexical recall); otherwise the in-memory default. Swap in

@@ -56,3 +56,11 @@ winners cut mem query p50 from 116 ms to 82 ms (−29%).
 
 Measure → find → re-author → re-measure. That is how every performance claim
 in this repository gets made.
+
+## Baselines & the regression gate
+
+Recorded container baselines live in `baselines/` (config + numbers, JSON).
+`rrf-bench --baseline <path>` re-runs the same configuration and exits
+non-zero on regression beyond tolerance — see
+[OBSERVABILITY](OBSERVABILITY.md). Runs stream JSONL events (`--events`)
+queryable directly by DuckDB.

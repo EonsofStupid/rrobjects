@@ -51,32 +51,57 @@ pub async fn serve(flow: Arc<ReasonReadyFlow>, opts: ServeOptions) -> Result<()>
         }
     };
 
-    tracing::info!("reason ready — awaiting shutdown signal (Ctrl-C / SIGTERM)");
-    wait_for_shutdown().await;
-    tracing::info!("shutdown signal received — stopping");
+    rrf_core::events::emit(
+        "serve.start",
+        serde_json::json!({ "node_id": opts.node_id, "listen": opts.listen }),
+    );
+    tracing::info!("reason ready — awaiting shutdown signal");
+    let sig = wait_for_shutdown().await;
+    tracing::info!(signal = sig, "shutdown signal received — stopping");
+    rrf_core::events::emit("serve.stop", serde_json::json!({ "signal": sig }));
     Ok(())
 }
 
-/// Block until Ctrl-C or (on Unix) SIGTERM.
-pub async fn wait_for_shutdown() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("cannot install SIGTERM handler: {e}; using Ctrl-C only");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
+/// Block until an OS shutdown signal arrives; returns which one.
+///
+/// The full Unix set is handled — `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGTERM` —
+/// and every receipt is consistently emitted as a `signal.received` event
+/// before this returns, so the analytics stream always shows *why* the
+/// process stopped. Non-Unix falls back to Ctrl-C.
+pub async fn wait_for_shutdown() -> &'static str {
+    let sig = listen_for_signal().await;
+    rrf_core::events::emit("signal.received", serde_json::json!({ "signal": sig }));
+    sig
+}
+
+#[cfg(unix)]
+async fn listen_for_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    let installed = (
+        signal(SignalKind::hangup()),
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::quit()),
+        signal(SignalKind::terminate()),
+    );
+    match installed {
+        (Ok(mut hup), Ok(mut int), Ok(mut quit), Ok(mut term)) => {
+            tokio::select! {
+                _ = hup.recv() => "SIGHUP",
+                _ = int.recv() => "SIGINT",
+                _ = quit.recv() => "SIGQUIT",
+                _ = term.recv() => "SIGTERM",
             }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        }
+        _ => {
+            tracing::warn!("cannot install full signal set; falling back to Ctrl-C");
+            let _ = tokio::signal::ctrl_c().await;
+            "SIGINT"
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
+}
+
+#[cfg(not(unix))]
+async fn listen_for_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "CTRL_C"
 }
