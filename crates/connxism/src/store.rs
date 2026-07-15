@@ -20,8 +20,8 @@ use tokio::sync::Mutex;
 use crate::estate::{rocks_err, Db, Estate};
 use crate::index::{bm25_scores, reciprocal_rank_fusion, Bm25Params, Posting, Postings};
 use crate::keys::{
-    self, CF_DOCS, CF_META, CF_TERMS, CF_VECS, META_DOC_COUNT, META_ESTATE, META_SHAPES,
-    META_TOTAL_TOKENS,
+    self, CF_DOCS, CF_FEED, CF_META, CF_TERMS, CF_VECS, META_DOC_COUNT, META_ESTATE, META_FEED_SEQ,
+    META_SHAPES, META_TOTAL_TOKENS,
 };
 use crate::model::{EstateInfo, Shape, StoredDoc};
 
@@ -304,6 +304,7 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
 
     let mut doc_count = db.get_u64(META_DOC_COUNT)?;
     let mut total_tokens = db.get_u64(META_TOTAL_TOKENS)?;
+    let mut feed_seq = db.get_u64(META_FEED_SEQ)?;
     let mut shapes: BTreeMap<String, u64> = db.get_json(CF_META, META_SHAPES)?.unwrap_or_default();
 
     // Postings are one row per (term, doc): every index write below is a
@@ -312,6 +313,7 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
     let docs_cf = db.cf(CF_DOCS)?;
     let vecs_cf = db.cf(CF_VECS)?;
     let terms_cf = db.cf(CF_TERMS)?;
+    let feed_cf = db.cf(CF_FEED)?;
 
     for r in records {
         let id = r.id.as_str().to_string();
@@ -366,12 +368,27 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
             id.as_bytes(),
             keys::encode_vec(r.embedding.as_slice()),
         );
+
+        // Changefeed row, atomic with the write itself.
+        let change = crate::model::Change {
+            seq: feed_seq,
+            op: crate::model::ChangeOp::Upsert,
+            doc_id: id.clone(),
+            at: crate::model::now_ms(),
+        };
+        batch.put_cf(
+            feed_cf,
+            feed_seq.to_be_bytes(),
+            serde_json::to_vec(&change)?,
+        );
+        feed_seq += 1;
     }
 
     let meta_cf = db.cf(CF_META)?;
     batch.put_cf(meta_cf, META_DOC_COUNT, doc_count.to_le_bytes());
     batch.put_cf(meta_cf, META_TOTAL_TOKENS, total_tokens.to_le_bytes());
     batch.put_cf(meta_cf, META_SHAPES, serde_json::to_vec(&shapes)?);
+    batch.put_cf(meta_cf, META_FEED_SEQ, feed_seq.to_le_bytes());
 
     db.0.write(batch).map_err(rocks_err)
 }
@@ -506,7 +523,23 @@ fn remove_blocking(db: &Db, id: &str) -> Result<()> {
     batch.delete_cf(db.cf(CF_DOCS)?, id.as_bytes());
     batch.delete_cf(db.cf(CF_VECS)?, id.as_bytes());
 
+    // Changefeed row, atomic with the removal.
+    let mut feed_seq = db.get_u64(META_FEED_SEQ)?;
+    let change = crate::model::Change {
+        seq: feed_seq,
+        op: crate::model::ChangeOp::Remove,
+        doc_id: id.to_string(),
+        at: crate::model::now_ms(),
+    };
+    batch.put_cf(
+        db.cf(CF_FEED)?,
+        feed_seq.to_be_bytes(),
+        serde_json::to_vec(&change)?,
+    );
+    feed_seq += 1;
+
     let meta_cf = db.cf(CF_META)?;
+    batch.put_cf(meta_cf, META_FEED_SEQ, feed_seq.to_le_bytes());
     let doc_count = db.get_u64(META_DOC_COUNT)?.saturating_sub(1);
     let total_tokens = db
         .get_u64(META_TOTAL_TOKENS)?

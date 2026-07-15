@@ -14,19 +14,22 @@ use crate::flow::ReasonReadyFlow;
 use crate::handler::FlowNode;
 
 /// How the daemon should run.
-#[derive(Debug, Clone)]
+#[derive(Clone, Default)]
 pub struct ServeOptions {
     /// This node's a2a id.
     pub node_id: String,
     /// If set, open the a2a TCP surface on this address (e.g. `127.0.0.1:7878`).
     pub listen: Option<String>,
+    /// Estate to expose on the a2a surface (`changes` subscription paging).
+    pub estate: Option<std::sync::Arc<connxism::Estate>>,
 }
 
-impl Default for ServeOptions {
-    fn default() -> Self {
+impl ServeOptions {
+    /// Options with the default node id and no listener.
+    pub fn named(node_id: impl Into<String>) -> Self {
         ServeOptions {
-            node_id: "rrf".to_string(),
-            listen: None,
+            node_id: node_id.into(),
+            ..ServeOptions::default()
         }
     }
 }
@@ -37,7 +40,11 @@ pub async fn serve(flow: Arc<ReasonReadyFlow>, opts: ServeOptions) -> Result<()>
         tracing::info!(stage, model, "component");
     }
 
-    let node = Arc::new(FlowNode::new(flow.clone(), NodeId::new(&opts.node_id)));
+    let mut node = FlowNode::new(flow.clone(), NodeId::new(&opts.node_id));
+    if let Some(estate) = &opts.estate {
+        node = node.with_estate(estate.clone());
+    }
+    let node = Arc::new(node);
 
     let _server = match &opts.listen {
         Some(addr) => {

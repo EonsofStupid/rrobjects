@@ -21,7 +21,7 @@
 
 /// All column families, in creation order.
 pub const COLUMN_FAMILIES: &[&str] = &[
-    CF_META, CF_NODES, CF_CONNS, CF_DOCS, CF_VECS, CF_TERMS, CF_TAGS, CF_TRENDS, CF_RELS,
+    CF_META, CF_NODES, CF_CONNS, CF_DOCS, CF_VECS, CF_TERMS, CF_TAGS, CF_TRENDS, CF_RELS, CF_FEED,
 ];
 
 /// Estate metadata + counters.
@@ -42,6 +42,8 @@ pub const CF_TAGS: &str = "tags";
 pub const CF_TRENDS: &str = "trends";
 /// Relations (RELATE-style edges), both directions.
 pub const CF_RELS: &str = "rels";
+/// Durable changefeed: seq (u64 BE) → JSON change record.
+pub const CF_FEED: &str = "feed";
 
 /// meta: the estate info blob.
 pub const META_ESTATE: &[u8] = b"estate";
@@ -51,6 +53,8 @@ pub const META_DOC_COUNT: &[u8] = b"doc_count";
 pub const META_TOTAL_TOKENS: &[u8] = b"total_tokens";
 /// meta: JSON map `shape key → count`.
 pub const META_SHAPES: &[u8] = b"shapes";
+/// meta: next changefeed sequence number (u64 LE).
+pub const META_FEED_SEQ: &[u8] = b"feed_seq";
 
 /// Separator between compound-key segments (never appears in ids/tags/metrics).
 pub const SEP: u8 = 0x00;

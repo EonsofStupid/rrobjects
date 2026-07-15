@@ -28,10 +28,10 @@ async fn main() -> anyhow::Result<()> {
     // DevPULSE components here as they land.
     // The estate must outlive the daemon: it owns the out-of-band ANN
     // applier thread (dropping it stops graph maintenance).
-    let mut _estate_keeper = None;
+    let mut estate_handle: Option<Arc<connxism::Estate>> = None;
     let flow = match std::env::var("RRF_ESTATE").ok() {
         Some(path) => {
-            let estate = connxism::Estate::open(&path, "rrf")?;
+            let estate = Arc::new(connxism::Estate::open(&path, "rrf")?);
             let map = estate_map(&estate)?;
             tracing::info!(
                 estate = %estate.info().name,
@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
             let flow = ReasonReadyFlow::builder()
                 .recall(Arc::new(estate.recall()))
                 .build();
-            _estate_keeper = Some(estate);
+            estate_handle = Some(estate);
             flow
         }
         None => ReasonReadyFlow::default_engine(),
@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let opts = ServeOptions {
         node_id: std::env::var("RRF_NODE").unwrap_or_else(|_| "rrf".to_string()),
         listen: std::env::var("RRF_LISTEN").ok(),
+        estate: estate_handle,
     };
 
     serve(Arc::new(flow), opts).await?;

@@ -223,6 +223,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "connectors"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "connxism",
+ "embedder",
+ "rrd",
+ "rrf-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "connxism"
 version = "0.0.1"
 dependencies = [

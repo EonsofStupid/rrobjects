@@ -332,6 +332,28 @@ impl Estate {
         self.pending.quiesce();
     }
 
+    // ---- changefeed ------------------------------------------------------------
+
+    /// Read changefeed entries with `seq >= since_seq`, oldest first, up to
+    /// `limit`. Feed rows are written atomically with the writes they record;
+    /// `seq` is the resume cursor for subscribers.
+    pub fn changes(&self, since_seq: u64, limit: usize) -> Result<Vec<crate::model::Change>> {
+        let handle = self.db.cf(crate::keys::CF_FEED)?;
+        let start = since_seq.to_be_bytes();
+        let mut out = Vec::new();
+        for item in self.db.0.iterator_cf(
+            handle,
+            rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward),
+        ) {
+            if out.len() >= limit {
+                break;
+            }
+            let (_, v) = item.map_err(rocks_err)?;
+            out.push(serde_json::from_slice(&v)?);
+        }
+        Ok(out)
+    }
+
     fn scan_json<T: serde::de::DeserializeOwned>(&self, cf: &str) -> Result<Vec<T>> {
         let handle = self.db.cf(cf)?;
         let mut out = Vec::new();

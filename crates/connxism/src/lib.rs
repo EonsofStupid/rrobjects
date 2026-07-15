@@ -28,8 +28,8 @@ mod store;
 pub use estate::Estate;
 pub use index::{Bm25Params, Posting, Postings};
 pub use model::{
-    now_ms, now_ns, ConnectorInfo, ConnectorKind, EstateInfo, NodeInfo, Shape, StoredDoc,
-    SyncState, SyncStatus, Transport, TrendPoint, WarpPoint,
+    now_ms, now_ns, Change, ChangeOp, ConnectorInfo, ConnectorKind, EstateInfo, NodeInfo, Shape,
+    StoredDoc, SyncState, SyncStatus, Transport, TrendPoint, WarpPoint,
 };
 pub use rels::{Relation, TraversalSpec};
 pub use store::ConnXRecall;

@@ -190,6 +190,29 @@ impl Shape {
     }
 }
 
+/// What a changefeed entry records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeOp {
+    /// A document was inserted or overwritten.
+    Upsert,
+    /// A document was removed.
+    Remove,
+}
+
+/// One durable changefeed entry (written atomically with the change itself).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Change {
+    /// Monotonic sequence number — the resume cursor.
+    pub seq: u64,
+    /// What happened.
+    pub op: ChangeOp,
+    /// The document affected.
+    pub doc_id: String,
+    /// When.
+    pub at: EpochMs,
+}
+
 /// One point in a metric's time-series.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrendPoint {

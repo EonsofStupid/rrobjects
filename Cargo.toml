@@ -7,6 +7,7 @@ members = [
     "crates/reranker",
     "crates/classifier",
     "crates/connectome",
+    "crates/connectors",
     "crates/connxism",
     "crates/rrd",
     "crates/rrf-net",
@@ -31,6 +32,7 @@ recall = { path = "crates/recall" }
 reranker = { path = "crates/reranker" }
 classifier = { path = "crates/classifier" }
 connectome = { path = "crates/connectome" }
+connectors = { path = "crates/connectors" }
 connxism = { path = "crates/connxism" }
 rrd = { path = "crates/rrd" }
 rrf-net = { path = "crates/rrf-net" }

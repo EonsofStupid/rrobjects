@@ -69,6 +69,20 @@ store doing *less* work over HTTP.
 Deferred honestly to Sprint 4: optimistic transactions (WriteBatch atomicity
 already covers batch writes), second KV backend, full typed query builder.
 
+## Sprint 4 — P4: Connectors & the live flow (active)
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | Durable changefeed: every upsert/remove appends a feed row **in the same WriteBatch** (atomic with the write); `Estate::changes(since_seq)` | ordering + resume-by-seq asserted in sync tests | ✅ |
+| 2 | `connectors` crate: `Driver` trait (resumable cursor batches) + filesystem driver + JSONL-feed driver | drivers exercised end-to-end in-container | ✅ |
+| 3 | Sync engine: pull → **RRD distill** (mode+tags land in the estate) → upsert → RELATE `connector→contains→doc` → cursor advance, evented | fs sync test: 7 docs, 7 provenance edges, 7 `mode:document` tags, feed ordered — and RRD's mode votes caught bad driver field-naming (`path`→Location) and forced honest metadata (`title`/`source_path`) | ✅ |
+| 4 | **The resume gate**: interrupt a sync, restart — no duplicates, cursor holds | simulated outage on pull #3: 6 docs durable, cursor held at "6"; resume ingested exactly 4; final count 10, feed shows exactly 10 upserts (replay-free) | ✅ |
+| 5 | Changes over a2a: `changes` verb (poll-based subscription, seq-resumable, `next_seq` cursor in every reply) | daemon exposes estate via ServeOptions; verb returns paged changes | ✅ |
+| 6 | Green close + docs + push | CI-green tree | ✅ |
+
+Deferred honestly: push-streaming subscriptions (poll-based lands first),
+IMAP-class driver (needs a live mailbox; the driver trait is its socket).
+
 ## Sprint log
 
 - **S1 opened 2026-07-15.** Sliver/RRD design recovered into ADR-0002 during
