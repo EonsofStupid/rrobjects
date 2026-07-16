@@ -61,7 +61,7 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Multi-vector per point (named vectors, late-interaction/ColBERT-style) | named spaces (`nvecs` CF, per-name dims, exact cosine) + token vectors (`mvecs` CF) with MaxSim rescore in the query plane (`using` / `multi`, over the wire) | ✅ exact; per-space ANN 🔨 |
 | Payload field indexes ×8: keyword, integer, float, bool, geo, text (full-text), datetime, uuid | `pidx` CF, order-preserving typed keys (keyword/int/float/bool ✅, 9.8× vs scan measured) | ✅ core; geo/datetime/uuid/full-text 🔨 |
 | Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | `Filter` (must/should/must_not × eq/any/range/exists), filter-first via `pidx` or post-filter | ✅; geo/nested 🔨 |
-| Text index w/ tokenizers (word/whitespace/prefix/multilingual, stemmer, stopwords) | `rrf-core::text` grows analyzer support | 🔨 P3 |
+| Text index w/ tokenizers (word/whitespace/prefix/multilingual, stemmer, stopwords) | `Analyzer` pipeline (word/whitespace/prefix-edge-gram × lowercase × stopwords × Porter stemmer, authored from the published algorithm), persisted per estate — postings and queries always agree | ✅ core; multilingual ⬜ |
 | Geo index (radius/box/polygon) | estate geo CF | ⬜ P3 |
 | WAL + flush/ack semantics | RocksDB WAL (✅ via estate) + explicit ack | ✅ base → 🔨 P5 semantics |
 | Segments + optimizer (merge, vacuum, indexing thresholds) | estate maintenance tasks | 🔨 P5 |
@@ -123,7 +123,7 @@ operate`
 | Capability | rrf home | Status |
 |---|---|---|
 | KV abstraction with backends: mem, rocksdb, surrealkv-class, tikv-class, indxdb (browser), FDB-class | `connxism::Db` seam (rocksdb ✅, mem 🔨 P3; distributed backends ⬜ P8) | ✅/🔨 |
-| Full-text index: analyzers (tokenizers/filters/stemmers), BM25 scoring, highlighter, offsets | postings ✅ BM25 core; analyzers/highlight 🔨 P3 | ✅ core |
+| Full-text index: analyzers (tokenizers/filters/stemmers), BM25 scoring, highlighter, offsets | postings ✅ BM25 + `Analyzer` (tokenizers/stopwords/stemmer) ✅; highlighter/offsets 🔨 | ✅ core |
 | HNSW + DiskANN vector trees | **excised in the reference by the author's own design — replaced by Recall** | ✅ by architecture |
 | Index planner / query optimizer (streaming + legacy) | query planning in builder | 🔨 P3/P5 |
 | Sequences | estate sequence CF | 🔨 P3 |

@@ -13,7 +13,6 @@ use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_trait::async_trait;
 use recall::AnnIndex;
-use rrf_core::text::content_tokens;
 use rrf_core::{Candidate, Embedding, Id, Recall, Result, RrfError, VectorRecord};
 use tokio::sync::Mutex;
 
@@ -41,6 +40,7 @@ pub struct ConnXRecall {
     ann: Arc<StdRwLock<AnnIndex>>,
     pending: Arc<crate::pending::Pending>,
     feed_notify: Arc<tokio::sync::Notify>,
+    analyzer: Arc<rrf_core::text::Analyzer>,
     writer: Arc<Mutex<()>>,
     params: Bm25Params,
     /// Rescore graph hits exactly from the durable vectors (set when the
@@ -57,6 +57,7 @@ impl Estate {
             ann: self.ann.clone(),
             pending: self.pending.clone(),
             feed_notify: self.feed_notify.clone(),
+            analyzer: Arc::new(self.info().analyzer.clone()),
             writer: Arc::new(Mutex::new(())),
             params: Bm25Params::default(),
             rescore: self.quantized,
@@ -227,7 +228,7 @@ impl ConnXRecall {
     pub async fn lexical_search(&self, query: &str, top_k: usize) -> Result<Vec<Candidate>> {
         let db = self.db.clone();
         let params = self.params;
-        let terms = content_tokens(query);
+        let terms = self.analyzer.analyze(query);
         if terms.is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
@@ -254,7 +255,7 @@ impl ConnXRecall {
         let db = self.db.clone();
         let params = self.params;
         let q = query.clone();
-        let terms = content_tokens(query_text);
+        let terms = self.analyzer.analyze(query_text);
 
         tokio::task::spawn_blocking(move || {
             use std::collections::HashSet;
@@ -314,13 +315,14 @@ impl Recall for ConnXRecall {
         let _guard = self.writer.lock().await;
         let db = self.db.clone();
         let pending = self.pending.clone();
+        let analyzer = self.analyzer.clone();
         tokio::task::spawn_blocking(move || {
             // Two-phase: durable write commits first…
             let for_index: Vec<(Id, Embedding)> = records
                 .iter()
                 .map(|r| (r.id.clone(), r.embedding.clone()))
                 .collect();
-            upsert_blocking(&db, records)?;
+            upsert_blocking(&db, &analyzer, records)?;
             // …then graph ops enqueue for the out-of-band applier. Ingest is
             // never blocked by graph construction; searches stay correct by
             // overlaying the pending set (read-your-writes).
@@ -366,7 +368,7 @@ impl Recall for ConnXRecall {
         let pending = self.pending.clone();
         let params = self.params;
         let q = query.clone();
-        let terms = content_tokens(query_text);
+        let terms = self.analyzer.analyze(query_text);
         let depth = top_k.saturating_mul(FUSION_DEPTH_FACTOR).max(top_k);
         let rescore = self.rescore;
 
@@ -417,9 +419,10 @@ impl Recall for ConnXRecall {
         let _guard = self.writer.lock().await;
         let db = self.db.clone();
         let pending = self.pending.clone();
+        let analyzer = self.analyzer.clone();
         let id = id.clone();
         tokio::task::spawn_blocking(move || {
-            remove_blocking(&db, id.as_str())?;
+            remove_blocking(&db, &analyzer, id.as_str())?;
             pending.push_remove(id);
             Ok::<_, RrfError>(())
         })
@@ -442,7 +445,11 @@ impl Recall for ConnXRecall {
 
 // ---- blocking internals (run on the blocking pool) ----------------------------
 
-fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
+fn upsert_blocking(
+    db: &Db,
+    analyzer: &rrf_core::text::Analyzer,
+    records: Vec<VectorRecord>,
+) -> Result<()> {
     // Dimension guard: fixed by the first upsert, enforced forever after.
     let mut info: EstateInfo = db
         .get_json(CF_META, META_ESTATE)?
@@ -522,7 +529,7 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
         // Overwrite semantics: retract the old version's postings (lexical
         // and sparse), payload index rows, and counters.
         if let Some(old) = db.get_json::<StoredDoc>(CF_DOCS, id.as_bytes())? {
-            for term in content_tokens(&old.text) {
+            for term in analyzer.analyze(&old.text) {
                 batch.delete_cf(terms_cf, keys::term_key(&term, &id));
             }
             for dim in &old.sparse_dims {
@@ -546,7 +553,7 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
             doc_count = doc_count.saturating_sub(1);
         }
 
-        let tokens = content_tokens(&r.text);
+        let tokens = analyzer.analyze(&r.text);
         let token_len = tokens.len() as u32;
         let mut tf: HashMap<String, u32> = HashMap::new();
         for t in tokens {
@@ -783,14 +790,14 @@ fn lexical_blocking(
     Ok(out)
 }
 
-fn remove_blocking(db: &Db, id: &str) -> Result<()> {
+fn remove_blocking(db: &Db, analyzer: &rrf_core::text::Analyzer, id: &str) -> Result<()> {
     let Some(old) = db.get_json::<StoredDoc>(CF_DOCS, id.as_bytes())? else {
         return Ok(());
     };
 
     let mut batch = rocksdb::WriteBatch::default();
     let terms_cf = db.cf(CF_TERMS)?;
-    for term in content_tokens(&old.text) {
+    for term in analyzer.analyze(&old.text) {
         batch.delete_cf(terms_cf, keys::term_key(&term, id));
     }
     let pidx_cf = db.cf(CF_PIDX)?;

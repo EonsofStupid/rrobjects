@@ -301,3 +301,23 @@ Gates (`cargo test -p rrf-flow --test watch`): history drained in order,
 live upserts AND a remove arrive as pushed frames on the one connection
 within timeout, seqs strictly increase, reconnect from the returned cursor
 replays exactly the missed change, unauthorized watch refused.
+
+## Sprint 14: text analyzers (2026-07-16)
+
+The lexical index grew a configurable analyzer pipeline — tokenizer
+(word / whitespace / prefix edge-grams) × lowercase × stopwords × a Porter
+stemmer authored from the published 1980 algorithm (zero-dep, 46 canonical
+spec pairs gated). The analyzer is **part of the index's identity**: fixed
+at estate creation, persisted in `EstateInfo`, applied identically to
+postings and queries; existing estates deserialize to the exact legacy
+pipeline they were indexed with.
+
+Gates (`cargo test -p connxism --test analyzer` + rrf-core units):
+- stemming estate matches run/runs/running to the same doc; the legacy
+  estate does not stem (both asserted);
+- pure-stopword queries return nothing (stopwords never reach postings);
+- prefix analyzer serves autocomplete ("con" → connectome doc, "rea" →
+  reason doc) straight off BM25;
+- overwrite retracts postings through the same analyzer;
+- reopen with a different config keeps the persisted analyzer (creation
+  wins once, forever).

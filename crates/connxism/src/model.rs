@@ -47,6 +47,11 @@ pub struct EstateInfo {
     /// written under that name.
     #[serde(default)]
     pub named_dims: std::collections::BTreeMap<String, usize>,
+    /// The lexical analyzer this estate's postings were built with (fixed
+    /// at creation; the serde default keeps pre-analyzer estates on the
+    /// legacy pipeline they were indexed with).
+    #[serde(default)]
+    pub analyzer: rrf_core::text::Analyzer,
 }
 
 /// How a warp point is reached.

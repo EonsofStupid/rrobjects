@@ -21,7 +21,15 @@ async fn quantized_estate_recall_gate() {
     let n = 2048; // above the ANN routing threshold — the graph answers
     let dim = 64;
     let dir = tempfile::tempdir().unwrap();
-    let estate = Estate::open_with(dir.path(), "sq8", EstateConfig { quantized: true }).unwrap();
+    let estate = Estate::open_with(
+        dir.path(),
+        "sq8",
+        EstateConfig {
+            quantized: true,
+            ..EstateConfig::default()
+        },
+    )
+    .unwrap();
     let recall = estate.recall();
 
     let mut vecs = Vec::with_capacity(n);

@@ -80,6 +80,11 @@ pub struct EstateConfig {
     /// column family, so scores at the API stay exact — quantization is a
     /// memory decision, not an accuracy decision.
     pub quantized: bool,
+    /// The text analyzer for the lexical (BM25) index. **Fixed at estate
+    /// creation** — it is part of the index's identity (postings and
+    /// queries must agree on what a token is); reopening ignores this
+    /// field in favour of the persisted one.
+    pub analyzer: rrf_core::text::Analyzer,
 }
 
 /// One operator estate: the kvs-connectome over a single RocksDB.
@@ -127,6 +132,7 @@ impl Estate {
                     created_at: now_ms(),
                     dim: None,
                     named_dims: std::collections::BTreeMap::new(),
+                    analyzer: config.analyzer.clone(),
                 };
                 db.put_json(CF_META, keys::META_ESTATE, &fresh)?;
                 fresh

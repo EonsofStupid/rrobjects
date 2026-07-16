@@ -152,6 +152,15 @@ paths); geo/datetime/uuid/full-text payload index types; nested filters.
 | 6 | `query_batch` + Euclid/Manhattan metrics on `Embedding` | ✅ batch ≡ sequential (asserted) | ✅ |
 | 7 | Green close + docs + push | fmt/clippy/test: 0 warnings, 41 suites green | ✅ |
 
+## Sprint 14 — Text analyzers (tokenizers, stemmer, stopwords)
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | `rrf-core::text::Analyzer`: tokenizer (word / whitespace / prefix edge-grams) × lowercase × stopwords × Porter stemmer (authored from the published algorithm, zero-dep) | stemmer unit gates on canonical spec pairs; prefix/whitespace tokenizer unit gates | ✅ |
+| 2 | Estate-configurable: `EstateConfig.analyzer` persisted into `EstateInfo` at creation (serde default = legacy word+lower+stop, so existing estates are untouched); BM25 postings AND lexical queries both run through the estate's analyzer | reopen keeps the analyzer; index/query agreement asserted | ✅ |
+| 3 | Retrieval gates: stemmed estate matches "run"→"running" doc lexically, legacy estate doesn't; stopwords produce zero postings rows; prefix analyzer serves autocomplete ("con"→"connectome") | in-tree tests | ✅ |
+| 4 | Green close: fmt/clippy/test, PARITY analyzer rows, BENCHMARKS note, push | full workspace green | ✅ |
+
 ## Sprint 13 — Push-stream changefeed subscriptions over a2a
 
 | # | Step | Verification gate | Status |
