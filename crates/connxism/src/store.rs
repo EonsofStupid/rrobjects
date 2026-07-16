@@ -37,7 +37,7 @@ const ANN_MIN_CORPUS: usize = 1024;
 /// Persistent, hybrid (dense + lexical) recall over an estate.
 #[derive(Clone)]
 pub struct ConnXRecall {
-    db: Db,
+    pub(crate) db: Db,
     ann: Arc<StdRwLock<AnnIndex>>,
     pending: Arc<crate::pending::Pending>,
     writer: Arc<Mutex<()>>,

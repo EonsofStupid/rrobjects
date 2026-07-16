@@ -787,6 +787,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rrf-client"
+version = "0.0.1"
+dependencies = [
+ "rrf-core",
+ "rrf-flow",
+ "rrf-net",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rrf-core"
 version = "0.0.1"
 dependencies = [

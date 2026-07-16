@@ -115,6 +115,16 @@ Deferred honestly: gRPC surface + MCP transport binding (next slice of P5 —
 tonic/proto scaffolding deserves its own sprint), full IAM (capability
 attenuation per L3, after tokens prove the seam).
 
+## Sprint 8 — Data plane + client + MCP (active)
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | `EstateQuery` builder: text/vector/top_k + metadata **filter** + optional scope, executed hybrid with over-fetch post-filter (payload hydration for lexical hits) | ✅ every hit satisfies the filter | ✅ |
+| 2 | Facets, filtered count, scroll (cursor-paged listing) on the estate | ✅ facet counts exact (20/40 split); scroll covers all 60 docs, zero overlap | ✅ |
+| 3 | `rrf-client` crate: typed async client over a2a (ping/ask/index/changes/map, token-aware) — what Clyffy imports | ✅ against a live node; typed refusals surfaced | ✅ |
+| 4 | **MCP binding, real**: `rrf-mcp` stdio server (JSON-RPC 2.0; initialize / tools list+call) bridging any MCP client to a node | ✅ end-to-end: spawned the binary, spoke MCP, full-pipeline answers came back with candidates | ✅ |
+| 5 | Green close + docs + push | CI-green tree | ✅ |
+
 ## Sprint log
 
 - **S1 opened 2026-07-15.** Sliver/RRD design recovered into ADR-0002 during

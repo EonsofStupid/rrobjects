@@ -33,20 +33,20 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Batch update ops (`points/batch`, UpdateBatch) | ingestion machine batches | ✅ |
 | Update / delete named vectors per point | multi-vector records | ⬜ P2.5 |
 | Set / overwrite / delete / clear payload | `connxism` doc metadata ops | 🔨 P3 |
-| Scroll (paginated listing w/ filter) | estate scan API | 🔨 P3 |
-| Count (exact/approx w/ filter) | `Recall::len` + filtered count | ✅ partial → P3 |
+| Scroll (paginated listing w/ filter) | `Estate::scroll` (cursor-paged) | ✅ |
+| Count (exact/approx w/ filter) | `Estate::count` (filtered + free total) | ✅ |
 
 ### A3. Search & query plane
 | Capability | rrf home | Status |
 |---|---|---|
-| Search / SearchBatch (dense KNN + filter + params) | `Recall::search` (exact today) | ✅ exact → 🔨 P2 ANN |
-| Universal Query / QueryBatch / prefetch pipelines | `rrf-flow` typed query builder | 🔨 P3 |
+| Search / SearchBatch (dense KNN + filter + params) | ANN graph + pending overlay + filters | ✅ |
+| Universal Query / QueryBatch / prefetch pipelines | `EstateQuery` typed builder (hybrid/filter/scope) | ✅ core; batch/prefetch 🔨 |
 | Hybrid (dense + sparse/lexical fusion, RRF) | `hybrid_search` (BM25+dense, RRF-fused) | ✅ |
 | SearchGroups / QueryGroups (group by payload field) | grouped recall | ⬜ P3 |
 | Recommend / RecommendBatch / RecommendGroups (pos/neg examples) | recall strategies | ⬜ P4 |
 | Discover / DiscoverBatch (context pairs steering) | recall strategies | ⬜ P4 |
 | Search matrix (pairs/offsets similarity matrix) | analytics over recall | ⬜ P5 |
-| Facet (value counts over payload field) | estate facet API (tags ✅ are one facet) | 🔨 P3 |
+| Facet (value counts over payload field) | `Estate::facet` (exact, v1 scan) | ✅ |
 | Random sampling | recall sampling | ⬜ P5 |
 | Score threshold / offset / with_payload / with_vectors selectors | query options | 🔨 P3 |
 
@@ -54,13 +54,13 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Capability | rrf home | Status |
 |---|---|---|
 | Distance metrics: Cosine ✅, Dot, Euclid, Manhattan | `rrf-core::Embedding` + SIMD kernels | ✅ cosine/dot → 🔨 P2 rest |
-| HNSW-class ANN graph (m, ef_construct, ef, payload-aware `m_payload`) | `recall::AnnIndex` (clean-authored) | 🔨 **P2** |
+| HNSW-class ANN graph (m, ef_construct, ef) | `recall::AnnIndex` (recall@10 ≥ 0.95 gated; out-of-band build) | ✅ |
 | Plain (exact) index fallback | `FlatRecall` / estate scan | ✅ |
 | Quantization: scalar u8 / PQ / binary / 1.5-bit+2-bit (TQ) | `recall::quant` | 🔨 P2 (scalar) → P2.5 |
 | Sparse vectors + sparse index (inverted, on-disk variants) | weighted postings (`connxism`) | ✅ BM25 form → 🔨 P2 weighted |
 | Multi-vector per point (named vectors, late-interaction/ColBERT-style) | multi-vector records | ⬜ P2.5 |
 | Payload field indexes ×8: keyword, integer, float, bool, geo, text (full-text), datetime, uuid | estate secondary indexes (`idx` CFs) | 🔨 P2/P3 |
-| Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | filter pushdown into recall | 🔨 P2 |
+| Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | `EstateQuery` equality-must (over-fetch post-filter) | ✅ core; range/should/nested 🔨 P3 tail |
 | Text index w/ tokenizers (word/whitespace/prefix/multilingual, stemmer, stopwords) | `rrf-core::text` grows analyzer support | 🔨 P3 |
 | Geo index (radius/box/polygon) | estate geo CF | ⬜ P3 |
 | WAL + flush/ack semantics | RocksDB WAL (✅ via estate) + explicit ack | ✅ base → 🔨 P5 semantics |
@@ -72,12 +72,12 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 ### A5. Snapshots / cluster / ops
 | Capability | rrf home | Status |
 |---|---|---|
-| Snapshots: create/list/download/upload/recover (full + per-collection + per-shard) | `Estate::snapshot` (RocksDB checkpoint) | 🔨 P5 |
+| Snapshots: create/list/download/upload/recover (full + per-collection + per-shard) | `Estate::snapshot_to` (checkpoint; opens as a working estate) | ✅ core |
 | Distributed: raft consensus, shards, replicas, transfers, recovery (`/cluster/*`) | warp-mesh scale-out | ⬜ P8 |
 | `/metrics` (prometheus), `/healthz` `/livez` `/readyz` | events ✅ + health surface | 🔨 P5 |
 | `/issues` (self-reported problems) | estate diagnostics from trends | ⬜ P5 |
 | Telemetry endpoint | events/trends ✅ (DuckDB-native) | ✅ different-and-better |
-| API keys / RBAC / JWT | auth capabilities (a2a + gRPC) | 🔨 P5 |
+| API keys / RBAC / JWT | capability tokens on a2a ✅ (L3 v1); RBAC/JWT 🔨 | ✅ v1 |
 | Strict mode / resource limits | estate quotas | ⬜ P5 |
 
 ---
@@ -92,10 +92,10 @@ SHOW, SLEEP, UPDATE, UPSERT, USE`
 | Capability | rrf home | Status |
 |---|---|---|
 | CRUD: CREATE/INSERT/SELECT/UPDATE/UPSERT/DELETE | typed query builder (`rrf-flow`) | 🔨 P3 |
-| **RELATE** (graph edges) + graph traversal in SELECT (`->edge->node`) | `connxism` relations CF + `connectome::route` | 🔨 **P3** |
+| **RELATE** (graph edges) + graph traversal in SELECT (`->edge->node`) | `Estate::relate/traverse` + routed `scoped_search` (gate 1.000 vs 0.025) | ✅ |
 | DEFINE ×17: access, analyzer, api, bucket, config, database, event, field, function, index, model, module, namespace, param, sequence, table, user | estate catalog (subset; see per-row mapping in C) | 🔨 P3–P6 |
-| LIVE / KILL (live queries) | watch subscriptions over a2a | 🔨 P4 |
-| SHOW CHANGES (changefeeds) | durable changefeed CF | 🔨 P4 |
+| LIVE / KILL (live queries) | seq-resumable `changes` paging over a2a ✅; push-stream 🔨 | ✅ poll |
+| SHOW CHANGES (changefeeds) | durable feed CF, atomic with writes | ✅ |
 | Transactions (BEGIN/COMMIT/CANCEL) | RocksDB TransactionDB | 🔨 P3 |
 | INFO (ns/db/table/index introspection) | estate info + `INFO`-verb on a2a | ✅ partial |
 | REBUILD INDEX | estate reindex task | 🔨 P5 |
@@ -136,7 +136,7 @@ operate`
 | HTTP REST (`/sql`, `/key/*` CRUD, import/export, health, version, sync) | HTTP read surface | 🔨 P5 |
 | WebSocket RPC (bidirectional, live query delivery) | a2a TCP ✅ + WS binding | 🔨 P4/P5 |
 | **GraphQL** | after typed builder | ⬜ P6 |
-| **MCP endpoint (the reference serves MCP natively!)** | `rrf-net::mcp` — warp-point transport ties in | 🔨 **P5** (validates the warp design) |
+| **MCP endpoint (the reference serves MCP natively!)** | `rrf-mcp` stdio server ✅ (tools: ask/index/changes, end-to-end tested); HTTP-SSE transport ⬜ | ✅ core |
 | ML endpoints (model upload/exec: surrealml-class) | DevPULSE model registry | 🔨 P7 |
 | Auth: signin/signup, JWT, root/ns/db/record users, IAM roles | capability tokens | 🔨 P5 |
 | Import/export (SQL dump) | estate export/import | 🔨 P5 |

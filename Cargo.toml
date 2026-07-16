@@ -11,6 +11,7 @@ members = [
     "crates/connxism",
     "crates/rrd",
     "crates/rrf-net",
+    "crates/rrf-client",
     "crates/rrf-flow",
 ]
 
@@ -36,6 +37,7 @@ connectors = { path = "crates/connectors" }
 connxism = { path = "crates/connxism" }
 rrd = { path = "crates/rrd" }
 rrf-net = { path = "crates/rrf-net" }
+rrf-client = { path = "crates/rrf-client" }
 rrf-flow = { path = "crates/rrf-flow" }
 
 # External

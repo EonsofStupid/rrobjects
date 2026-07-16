@@ -22,6 +22,7 @@ pub mod index;
 pub mod keys;
 pub mod model;
 mod pending;
+mod query;
 mod rels;
 mod store;
 
@@ -31,6 +32,7 @@ pub use model::{
     now_ms, now_ns, Change, ChangeOp, ConnectorInfo, ConnectorKind, EstateInfo, NodeInfo, Shape,
     StoredDoc, SyncState, SyncStatus, Transport, TrendPoint, WarpPoint,
 };
+pub use query::EstateQuery;
 pub use rels::{Relation, TraversalSpec};
 pub use store::ConnXRecall;
 
