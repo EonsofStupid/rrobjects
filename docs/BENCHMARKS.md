@@ -385,3 +385,20 @@ retraction/rewrite, the shape-census adjustment, and a changefeed row.
 Gates assert the index-resolved id-sets before/after every op (old rows
 gone, new rows live, siblings untouched), one feed row per op, and that
 mutating a missing doc errors.
+
+## Sprint 19: the 12–18 surface over the wire + MCP (2026-07-16)
+
+Every capability from sprints 12–18 is now remote: new a2a verbs
+(`matrix`, `sample`, `collections`, `drop_collection`, alias
+create/list/delete, the four payload ops) with matching typed `Client`
+methods, and two new MCP tools (`rrf_collections`, `rrf_payload`).
+Named-space and sparse search needed **no** new verbs — they already ride
+`query` via `using`/`sparse`, now gated over live TCP.
+
+Gate (`cargo test -p rrf-flow --test wire_surface`): one end-to-end test
+drives every verb against a live node — matrix pairs equal local (1e-6),
+same-seed sample identical, alias created over the wire redirects a wire
+query then deletes clean, payload ops visible in local reads (and a bad
+target errors across the wire), drop_collection removes exactly its
+members. All verbs sit behind the same token gate as the rest of the
+surface.

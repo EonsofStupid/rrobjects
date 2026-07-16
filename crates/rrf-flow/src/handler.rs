@@ -189,6 +189,106 @@ impl Handler for FlowNode {
                 Ok(Some(msg.reply(serde_json::json!({ "total": total }))))
             }
 
+            // Estate admin + analytics verbs, sprint 12–18 surface. Every
+            // arm needs the estate; the macro-ish helper keeps them terse.
+            "matrix"
+            | "sample"
+            | "collections"
+            | "drop_collection"
+            | "create_alias"
+            | "aliases"
+            | "delete_alias"
+            | "set_payload"
+            | "overwrite_payload"
+            | "delete_payload_keys"
+            | "clear_payload" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let b = &msg.body;
+                let str_of = |k: &str| b.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let reply = match msg.verb.as_str() {
+                    "matrix" => {
+                        let ids: Vec<String> = b
+                            .get("ids")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let pairs = estate.recall().similarity_matrix(&ids).await?;
+                        serde_json::json!({ "pairs": pairs })
+                    }
+                    "sample" => {
+                        let n = b.get("n").and_then(|v| v.as_u64()).unwrap_or(10).min(4096);
+                        let seed = b.get("seed").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let docs = estate.sample(n as usize, seed)?;
+                        serde_json::json!({ "docs": docs })
+                    }
+                    "collections" => {
+                        serde_json::json!({ "collections": estate.collections()? })
+                    }
+                    "drop_collection" => {
+                        let dropped = estate.drop_collection(&str_of("name"))?;
+                        serde_json::json!({ "dropped": dropped })
+                    }
+                    "create_alias" => {
+                        estate.create_alias(&str_of("alias"), &str_of("collection"))?;
+                        serde_json::json!({ "ok": true })
+                    }
+                    "aliases" => serde_json::json!({ "aliases": estate.aliases()? }),
+                    "delete_alias" => {
+                        estate.delete_alias(&str_of("alias"))?;
+                        serde_json::json!({ "ok": true })
+                    }
+                    op @ ("set_payload"
+                    | "overwrite_payload"
+                    | "delete_payload_keys"
+                    | "clear_payload") => {
+                        let id = str_of("id");
+                        let recall = estate.recall();
+                        let done = match op {
+                            "set_payload" | "overwrite_payload" => {
+                                let meta: rrf_core::Metadata = b
+                                    .get("metadata")
+                                    .cloned()
+                                    .map(serde_json::from_value)
+                                    .transpose()?
+                                    .unwrap_or_default();
+                                if op == "set_payload" {
+                                    recall.set_payload(&id, meta).await
+                                } else {
+                                    recall.overwrite_payload(&id, meta).await
+                                }
+                            }
+                            "delete_payload_keys" => {
+                                let keys: Vec<String> = b
+                                    .get("keys")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|x| x.as_str().map(str::to_string))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                recall.delete_payload_keys(&id, keys).await
+                            }
+                            _ => recall.clear_payload(&id).await,
+                        };
+                        match done {
+                            Ok(()) => serde_json::json!({ "ok": true }),
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        }
+                    }
+                    _ => unreachable!("outer match guards the verb list"),
+                };
+                Ok(Some(msg.reply(reply)))
+            }
+
             _ => Ok(None),
         }
     }

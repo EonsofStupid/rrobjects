@@ -67,6 +67,34 @@ fn tool_list() -> serde_json::Value {
             }
         },
         {
+            "name": "rrf_collections",
+            "description": "Manage the estate's named collections and aliases: list collections (with counts), drop a collection, create/list/delete aliases.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "drop", "create_alias", "aliases", "delete_alias"] },
+                    "name": { "type": "string", "description": "Collection name (drop)." },
+                    "alias": { "type": "string" },
+                    "collection": { "type": "string", "description": "Alias target (create_alias)." }
+                },
+                "required": ["action"]
+            }
+        },
+        {
+            "name": "rrf_payload",
+            "description": "Per-point payload ops: set (merge), overwrite, delete_keys, clear — payload indexes stay exactly consistent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["set", "overwrite", "delete_keys", "clear"] },
+                    "id": { "type": "string" },
+                    "metadata": { "type": "object" },
+                    "keys": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["action", "id"]
+            }
+        },
+        {
             "name": "rrf_changes",
             "description": "Page the estate's durable changefeed (resume with next_seq).",
             "inputSchema": {
@@ -136,6 +164,76 @@ async fn call_tool(client: &Client, name: &str, args: &serde_json::Value) -> ser
                 .changes(since, limit)
                 .await
                 .map(|p| serde_json::json!({ "changes": p.changes, "next_seq": p.next_seq }))
+                .map_err(|e| e.to_string())
+        }
+        "rrf_collections" => {
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("");
+            let str_of = |k: &str| {
+                args.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            match action {
+                "list" => client
+                    .collections()
+                    .await
+                    .map(|c| serde_json::json!({ "collections": c }))
+                    .map_err(|e| e.to_string()),
+                "drop" => client
+                    .drop_collection(&str_of("name"))
+                    .await
+                    .map(|n| serde_json::json!({ "dropped": n }))
+                    .map_err(|e| e.to_string()),
+                "create_alias" => client
+                    .create_alias(&str_of("alias"), &str_of("collection"))
+                    .await
+                    .map(|_| serde_json::json!({ "ok": true }))
+                    .map_err(|e| e.to_string()),
+                "aliases" => client
+                    .aliases()
+                    .await
+                    .map(|a| serde_json::json!({ "aliases": a }))
+                    .map_err(|e| e.to_string()),
+                "delete_alias" => client
+                    .delete_alias(&str_of("alias"))
+                    .await
+                    .map(|_| serde_json::json!({ "ok": true }))
+                    .map_err(|e| e.to_string()),
+                other => Err(format!("unknown action: {other}")),
+            }
+        }
+        "rrf_payload" => {
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("");
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let meta = args
+                .get("metadata")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let done = match action {
+                "set" => client.set_payload(id, meta).await,
+                "overwrite" => client.overwrite_payload(id, meta).await,
+                "delete_keys" => {
+                    let keys: Vec<String> = args
+                        .get("keys")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    client.delete_payload_keys(id, &keys).await
+                }
+                "clear" => client.clear_payload(id).await,
+                other => {
+                    return serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("unknown action: {other}") }],
+                        "isError": true
+                    })
+                }
+            };
+            done.map(|_| serde_json::json!({ "ok": true }))
                 .map_err(|e| e.to_string())
         }
         other => Err(format!("unknown tool: {other}")),

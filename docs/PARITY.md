@@ -136,7 +136,7 @@ operate`
 | HTTP REST (`/sql`, `/key/*` CRUD, import/export, health, version, sync) | HTTP read surface | 🔨 P5 |
 | WebSocket RPC (bidirectional, live query delivery) | a2a TCP ✅ + WS binding | 🔨 P4/P5 |
 | **GraphQL** | after typed builder | ⬜ P6 |
-| **MCP endpoint (the reference serves MCP natively!)** | `rrf-mcp` stdio server ✅ (tools: ask/index/changes, end-to-end tested); HTTP-SSE transport ⬜ | ✅ core |
+| **MCP endpoint (the reference serves MCP natively!)** | `rrf-mcp` stdio server ✅ (tools: ask/query/index/changes/**collections**/**payload**, end-to-end tested); HTTP-SSE transport ⬜ | ✅ core |
 | ML endpoints (model upload/exec: surrealml-class) | DevPULSE model registry | 🔨 P7 |
 | Auth: signin/signup, JWT, root/ns/db/record users, IAM roles | capability tokens | 🔨 P5 |
 | Import/export (SQL dump) | estate export/import | 🔨 P5 |

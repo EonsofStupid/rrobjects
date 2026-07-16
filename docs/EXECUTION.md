@@ -152,6 +152,15 @@ paths); geo/datetime/uuid/full-text payload index types; nested filters.
 | 6 | `query_batch` + Euclid/Manhattan metrics on `Embedding` | ✅ batch ≡ sequential (asserted) | ✅ |
 | 7 | Green close + docs + push | fmt/clippy/test: 0 warnings, 41 suites green | ✅ |
 
+## Sprint 19 — The sprint 12–18 surface over the wire + MCP
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | a2a verbs (token-gated like all verbs): `matrix`, `sample`, `collections`, `drop_collection`, `create_alias`, `aliases`, `delete_alias`, `set_payload`, `overwrite_payload`, `delete_payload_keys`, `clear_payload` (named/sparse search already ride `query` via `using`/`sparse` — gated over the wire, no new verbs) | each verb answers over live TCP | ✅ |
+| 2 | `Client` methods for every verb above | wire results equal local calls (matrix pairwise scores, deterministic sample, collection lists, alias redirects, payload visibility) | ✅ |
+| 3 | MCP: `rrf_collections` (list/drop/alias actions) + `rrf_payload` (set/overwrite/delete_keys/clear) tools | tool registry lists them; actions bridge to the node | ✅ |
+| 4 | Green close: fmt/clippy/test, PARITY mesh/tooling rows, BENCHMARKS note, push | full workspace green | ✅ |
+
 ## Sprint 18 — Aliases + per-point payload CRUD
 
 | # | Step | Verification gate | Status |

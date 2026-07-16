@@ -171,6 +171,104 @@ impl Client {
         Ok(cursor)
     }
 
+    /// Pairwise cosine similarity among stored vectors (upper triangle).
+    pub async fn similarity_matrix(&self, ids: &[String]) -> Result<Vec<(String, String, f32)>> {
+        let body = self
+            .call("matrix", serde_json::json!({ "ids": ids }))
+            .await?;
+        Ok(serde_json::from_value(
+            body.get("pairs").cloned().unwrap_or_default(),
+        )?)
+    }
+
+    /// Deterministic random sample of up to `n` stored documents.
+    pub async fn sample(&self, n: usize, seed: u64) -> Result<Vec<serde_json::Value>> {
+        let body = self
+            .call("sample", serde_json::json!({ "n": n, "seed": seed }))
+            .await?;
+        Ok(serde_json::from_value(
+            body.get("docs").cloned().unwrap_or_default(),
+        )?)
+    }
+
+    /// The node's named collections with exact member counts.
+    pub async fn collections(&self) -> Result<Vec<(String, u64)>> {
+        let body = self.call("collections", serde_json::json!({})).await?;
+        Ok(serde_json::from_value(
+            body.get("collections").cloned().unwrap_or_default(),
+        )?)
+    }
+
+    /// Drop a collection; returns how many members were removed.
+    pub async fn drop_collection(&self, name: &str) -> Result<u64> {
+        let body = self
+            .call("drop_collection", serde_json::json!({ "name": name }))
+            .await?;
+        Ok(body.get("dropped").and_then(|v| v.as_u64()).unwrap_or(0))
+    }
+
+    /// Create (or atomically repoint) a collection alias.
+    pub async fn create_alias(&self, alias: &str, collection: &str) -> Result<()> {
+        self.call(
+            "create_alias",
+            serde_json::json!({ "alias": alias, "collection": collection }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The node's alias map.
+    pub async fn aliases(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let body = self.call("aliases", serde_json::json!({})).await?;
+        Ok(serde_json::from_value(
+            body.get("aliases").cloned().unwrap_or_default(),
+        )?)
+    }
+
+    /// Delete an alias.
+    pub async fn delete_alias(&self, alias: &str) -> Result<()> {
+        self.call("delete_alias", serde_json::json!({ "alias": alias }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Merge keys into a document's payload.
+    pub async fn set_payload(&self, id: &str, metadata: serde_json::Value) -> Result<()> {
+        self.call(
+            "set_payload",
+            serde_json::json!({ "id": id, "metadata": metadata }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Replace a document's payload entirely.
+    pub async fn overwrite_payload(&self, id: &str, metadata: serde_json::Value) -> Result<()> {
+        self.call(
+            "overwrite_payload",
+            serde_json::json!({ "id": id, "metadata": metadata }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Remove keys from a document's payload.
+    pub async fn delete_payload_keys(&self, id: &str, keys: &[String]) -> Result<()> {
+        self.call(
+            "delete_payload_keys",
+            serde_json::json!({ "id": id, "keys": keys }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Clear a document's payload.
+    pub async fn clear_payload(&self, id: &str) -> Result<()> {
+        self.call("clear_payload", serde_json::json!({ "id": id }))
+            .await
+            .map(|_| ())
+    }
+
     /// The connectome map for a query (JSON graph the UI renders).
     pub async fn map(&self, query: &str) -> Result<serde_json::Value> {
         self.call("map", serde_json::json!({ "query": query }))
