@@ -15,6 +15,9 @@ and is UNVERIFIED for real retrieval until this lands._
 - **Compute:** CPU works; CUDA or Metal strongly preferred for the reranker.
 - **Toolchain:** rust stable, clang/libclang (already used by rocksdb).
 
+> **Choosing** which model + runtime (Qwen3 sizes, Nemotron, candle vs
+> llama.cpp vs vLLM): see **[docs/MODEL_CHOICES.md](MODEL_CHOICES.md)**.
+
 ## 0.5 Turnkey: get the weights (one command)
 
 Weights are too big to vendor in git, so they are pulled on demand and verified
