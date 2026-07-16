@@ -72,6 +72,16 @@ pub(crate) fn rocks_err(e: rocksdb::Error) -> RrfError {
     RrfError::Recall(format!("kvs: {e}"))
 }
 
+/// Open-time choices for an estate.
+#[derive(Debug, Clone, Default)]
+pub struct EstateConfig {
+    /// Hold the ANN graph's vectors as SQ8 codes (~4× smaller memory).
+    /// Search results are **rescored exactly** from the durable vector
+    /// column family, so scores at the API stay exact — quantization is a
+    /// memory decision, not an accuracy decision.
+    pub quantized: bool,
+}
+
 /// One operator estate: the kvs-connectome over a single RocksDB.
 pub struct Estate {
     pub(crate) db: Db,
@@ -82,15 +92,22 @@ pub struct Estate {
     pub(crate) ann: Arc<StdRwLock<AnnIndex>>,
     /// Not-yet-applied graph ops + the applier's signaling.
     pub(crate) pending: Arc<crate::pending::Pending>,
+    /// Whether the graph stores SQ8 codes (search paths rescore exactly).
+    pub(crate) quantized: bool,
     applier: Option<std::thread::JoinHandle<()>>,
     info: EstateInfo,
 }
 
 impl Estate {
+    /// Open (or create) the estate at `path` with default configuration.
+    pub fn open(path: impl AsRef<Path>, name: &str) -> Result<Self> {
+        Self::open_with(path, name, EstateConfig::default())
+    }
+
     /// Open (or create) the estate at `path`. Rebuilds the ANN graph from
     /// the durable vector column family (the two-phase pattern's recovery
     /// path — the graph is always reconstructible).
-    pub fn open(path: impl AsRef<Path>, name: &str) -> Result<Self> {
+    pub fn open_with(path: impl AsRef<Path>, name: &str, config: EstateConfig) -> Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -113,7 +130,10 @@ impl Estate {
         };
 
         // Rebuild the ANN graph from durable vectors.
-        let mut ann = AnnIndex::new(AnnConfig::default());
+        let mut ann = AnnIndex::new(AnnConfig {
+            quantized: config.quantized,
+            ..AnnConfig::default()
+        });
         {
             let handle = db.cf(CF_VECS)?;
             let mut rebuilt = 0u64;
@@ -136,6 +156,7 @@ impl Estate {
             db,
             ann,
             pending,
+            quantized: config.quantized,
             applier: Some(applier),
             info,
         })
@@ -255,6 +276,77 @@ impl Estate {
     /// Number of documents carrying `tag`.
     pub fn tag_count(&self, tag: &str) -> Result<u64> {
         Ok(self.docs_by_tag(tag)?.len() as u64)
+    }
+
+    // ---- payload secondary indexes --------------------------------------------
+
+    /// Index a metadata field for filter-first queries. Registers the field
+    /// **before** backfilling, so writes that land mid-backfill maintain
+    /// their own rows (index puts are idempotent — overlap is harmless);
+    /// then backfills from every stored document. Idempotent per field.
+    pub fn create_payload_index(&self, field: &str) -> Result<()> {
+        let mut fields = crate::filter::indexed_fields(&self.db)?;
+        if fields.iter().any(|f| f == field) {
+            return Ok(());
+        }
+        fields.push(field.to_string());
+        self.db.put_json(CF_META, keys::META_PIDX, &fields)?;
+
+        // Backfill from the durable documents.
+        let docs_cf = self.db.cf(crate::keys::CF_DOCS)?;
+        let pidx_cf = self.db.cf(crate::keys::CF_PIDX)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut rows = 0u64;
+        for item in self.db.0.iterator_cf(docs_cf, rocksdb::IteratorMode::Start) {
+            let (_, v) = item.map_err(rocks_err)?;
+            let doc: crate::model::StoredDoc = serde_json::from_slice(&v)?;
+            if let Some(value) = doc.metadata.get(field) {
+                batch.put_cf(pidx_cf, keys::pidx_key(field, value, &doc.id), []);
+                rows += 1;
+                if rows.is_multiple_of(4096) {
+                    self.db
+                        .0
+                        .write(std::mem::take(&mut batch))
+                        .map_err(rocks_err)?;
+                }
+            }
+        }
+        self.db.0.write(batch).map_err(rocks_err)?;
+        rrf_core::events::emit(
+            "estate.payload_index",
+            serde_json::json!({ "field": field, "rows": rows }),
+        );
+        Ok(())
+    }
+
+    /// The payload-indexed field names.
+    pub fn payload_indexes(&self) -> Result<Vec<String>> {
+        crate::filter::indexed_fields(&self.db)
+    }
+
+    /// The exact id-set matching `filter`, resolved from payload indexes.
+    /// `None` when the filter references an unindexed field (callers fall
+    /// back to post-filtering).
+    pub fn ids_where(&self, filter: &crate::Filter) -> Result<Option<Vec<String>>> {
+        crate::filter::ids_where(&self.db, filter)
+    }
+
+    /// Count documents matching a DSL filter: index-resolved when every
+    /// referenced field is indexed, full scan otherwise.
+    pub fn count_where(&self, filter: &crate::Filter) -> Result<u64> {
+        if let Some(ids) = crate::filter::ids_where(&self.db, filter)? {
+            return Ok(ids.len() as u64);
+        }
+        let handle = self.db.cf(crate::keys::CF_DOCS)?;
+        let mut n = 0u64;
+        for item in self.db.0.iterator_cf(handle, rocksdb::IteratorMode::Start) {
+            let (_, v) = item.map_err(rocks_err)?;
+            let doc: crate::model::StoredDoc = serde_json::from_slice(&v)?;
+            if filter.matches(&doc.metadata) {
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     // ---- shapes ---------------------------------------------------------------

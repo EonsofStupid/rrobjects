@@ -115,7 +115,7 @@ Deferred honestly: gRPC surface + MCP transport binding (next slice of P5 —
 tonic/proto scaffolding deserves its own sprint), full IAM (capability
 attenuation per L3, after tokens prove the seam).
 
-## Sprint 8 — Data plane + client + MCP (active)
+## Sprint 8 — Data plane + client + MCP
 
 | # | Step | Verification gate | Status |
 |---|---|---|---|
@@ -124,6 +124,21 @@ attenuation per L3, after tokens prove the seam).
 | 3 | `rrf-client` crate: typed async client over a2a (ping/ask/index/changes/map, token-aware) — what Clyffy imports | ✅ against a live node; typed refusals surfaced | ✅ |
 | 4 | **MCP binding, real**: `rrf-mcp` stdio server (JSON-RPC 2.0; initialize / tools list+call) bridging any MCP client to a node | ✅ end-to-end: spawned the binary, spoke MCP, full-pipeline answers came back with candidates | ✅ |
 | 5 | Green close + docs + push | CI-green tree | ✅ |
+
+## Sprint 9 — Filter DSL + payload indexes + quantization
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | `Filter` DSL: must/should/must_not over eq / match-any / numeric range / exists; serde-serializable; merged with the legacy equality form at execution | ✅ clause semantics unit-tested; DSL results equal brute force on both strategies | ✅ |
+| 2 | Payload secondary indexes: `pidx` CF (`field \0 typed-value \0 doc`), order-preserving f64 encoding, rows maintained in the same WriteBatch as every upsert/remove, register-then-backfill `create_payload_index` | ✅ overwrite retracts old rows; remove retracts; **9.8× vs full scan @10k, identical counts** | ✅ |
+| 3 | Two-strategy execution: filter-first (index-resolved exact id-set → exact scoring inside it) when fully indexed and ≤4096 ids, over-fetch + hydrate + post-filter otherwise | ✅ test asserts each strategy is the one actually chosen | ✅ |
+| 4 | Query options: `score_threshold`, `ids_only` lean payload | ✅ threshold prunes, lean strips text+metadata | ✅ |
+| 5 | SQ8 scalar quantization: `recall::quant` (per-vector affine codes, asymmetric+symmetric dots), `AnnConfig.quantized`, `EstateConfig { quantized }`, exact rescore from durable vectors | ✅ graph gate recall@10 **0.982** (3.4× smaller); estate gate **0.976** with scores exact ≤1e-5 | ✅ |
+| 6 | Green close + docs + push | CI-green tree (fmt/clippy/test: 0 warnings, 40 suites green) | ✅ |
+
+Deferred honestly: `protoc` still absent in this container → gRPC surface
+stays deferred (a2a JSON wire + `rrf-client` + MCP remain the integration
+paths); geo/datetime/uuid/full-text payload index types; nested filters.
 
 ## Sprint log
 

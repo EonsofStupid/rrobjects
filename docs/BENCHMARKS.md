@@ -163,3 +163,39 @@ Recorded container baselines live in `baselines/` (config + numbers, JSON).
 non-zero on regression beyond tolerance — see
 [OBSERVABILITY](OBSERVABILITY.md). Runs stream JSONL events (`--events`)
 queryable directly by DuckDB.
+
+## Sprint 9: filters go index-first, vectors go 4× smaller (2026-07-16)
+
+**Payload secondary indexes** (`pidx` CF, one row per (field, typed value,
+doc), order-preserving numeric encoding so ranges are index scans): when
+every clause of a `Filter` touches an indexed field, the exact matching
+id-set is resolved from sorted scans and scored exactly inside it —
+filter-first, not post-filter.
+
+| 10k docs, `team = "sec" AND priority >= 8` | latency |
+|---|---|
+| full scan (unindexed clause forces it) | 150.2 ms |
+| **index-resolved** | **15.4 ms (9.8×)** |
+
+Both strategies return identical, brute-force-verified counts; the mixed
+test asserts each strategy is actually the one chosen. Reproduce:
+`cargo test -p connxism --test filters -- --nocapture`.
+
+**SQ8 scalar quantization** (`recall::quant`, per-vector affine codes;
+asymmetric + symmetric dots stay closed-form): the graph holds codes,
+searches over-fetch 2×, and hits are **rescored exactly** from the durable
+vector column family — quantization is a memory decision, never a silent
+accuracy decision.
+
+| 5k × 64d (in-graph gate) | full f32 | SQ8 |
+|---|---|---|
+| recall@10 vs exact | 0.95+ (gate) | **0.982** |
+| vector memory | 1,280,000 B | **380,000 B (3.4×)** |
+
+| 2,048-doc quantized estate (end-to-end) | measured |
+|---|---|
+| recall@10 vs full-precision ground truth | **0.976** |
+| returned scores | exact cosine (≤1e-5 from ground truth, asserted) |
+
+Reproduce: `cargo test -p recall quantized_recall_gate -- --nocapture` and
+`cargo test -p connxism --test quantized -- --nocapture`.

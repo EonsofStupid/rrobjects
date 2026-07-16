@@ -11,6 +11,7 @@
 
 mod ann;
 mod flat;
+pub mod quant;
 
 pub use ann::{AnnConfig, AnnIndex};
 pub use flat::FlatRecall;

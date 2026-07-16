@@ -20,8 +20,8 @@ use tokio::sync::Mutex;
 use crate::estate::{rocks_err, Db, Estate};
 use crate::index::{bm25_scores, reciprocal_rank_fusion, Bm25Params, Posting, Postings};
 use crate::keys::{
-    self, CF_DOCS, CF_FEED, CF_META, CF_TERMS, CF_VECS, META_DOC_COUNT, META_ESTATE, META_FEED_SEQ,
-    META_SHAPES, META_TOTAL_TOKENS,
+    self, CF_DOCS, CF_FEED, CF_META, CF_PIDX, CF_TERMS, CF_VECS, META_DOC_COUNT, META_ESTATE,
+    META_FEED_SEQ, META_SHAPES, META_TOTAL_TOKENS,
 };
 use crate::model::{EstateInfo, Shape, StoredDoc};
 
@@ -42,6 +42,10 @@ pub struct ConnXRecall {
     pending: Arc<crate::pending::Pending>,
     writer: Arc<Mutex<()>>,
     params: Bm25Params,
+    /// Rescore graph hits exactly from the durable vectors (set when the
+    /// graph stores quantized codes — scores must never be approximate at
+    /// the API surface without saying so; here we simply make them exact).
+    rescore: bool,
 }
 
 impl Estate {
@@ -53,6 +57,7 @@ impl Estate {
             pending: self.pending.clone(),
             writer: Arc::new(Mutex::new(())),
             params: Bm25Params::default(),
+            rescore: self.quantized,
         }
     }
 }
@@ -185,9 +190,12 @@ impl Recall for ConnXRecall {
         let ann = self.ann.clone();
         let pending = self.pending.clone();
         let q = query.clone();
-        tokio::task::spawn_blocking(move || dense_blocking(&db, &ann, &pending, &q, top_k, true))
-            .await
-            .map_err(|e| RrfError::Recall(format!("join: {e}")))?
+        let rescore = self.rescore;
+        tokio::task::spawn_blocking(move || {
+            dense_blocking(&db, &ann, &pending, &q, top_k, true, rescore)
+        })
+        .await
+        .map_err(|e| RrfError::Recall(format!("join: {e}")))?
     }
 
     async fn hybrid_search(
@@ -206,10 +214,11 @@ impl Recall for ConnXRecall {
         let q = query.clone();
         let terms = content_tokens(query_text);
         let depth = top_k.saturating_mul(FUSION_DEPTH_FACTOR).max(top_k);
+        let rescore = self.rescore;
 
         tokio::task::spawn_blocking(move || {
             // Two rankings over the same estate…
-            let dense = dense_blocking(&db, &ann, &pending, &q, depth, false)?;
+            let dense = dense_blocking(&db, &ann, &pending, &q, depth, false, rescore)?;
             let lexical = if terms.is_empty() {
                 Vec::new()
             } else {
@@ -314,14 +323,22 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
     let vecs_cf = db.cf(CF_VECS)?;
     let terms_cf = db.cf(CF_TERMS)?;
     let feed_cf = db.cf(CF_FEED)?;
+    let pidx_cf = db.cf(CF_PIDX)?;
+    let indexed_fields = crate::filter::indexed_fields(db)?;
 
     for r in records {
         let id = r.id.as_str().to_string();
 
-        // Overwrite semantics: retract the old version's postings and counters.
+        // Overwrite semantics: retract the old version's postings, payload
+        // index rows, and counters.
         if let Some(old) = db.get_json::<StoredDoc>(CF_DOCS, id.as_bytes())? {
             for term in content_tokens(&old.text) {
                 batch.delete_cf(terms_cf, keys::term_key(&term, &id));
+            }
+            for field in &indexed_fields {
+                if let Some(v) = old.metadata.get(field) {
+                    batch.delete_cf(pidx_cf, keys::pidx_key(field, v, &id));
+                }
             }
             total_tokens = total_tokens.saturating_sub(old.token_len as u64);
             if let Some(n) = shapes.get_mut(&old.shape.key()) {
@@ -352,6 +369,13 @@ fn upsert_blocking(db: &Db, records: Vec<VectorRecord>) -> Result<()> {
         *shapes.entry(shape.key()).or_insert(0) += 1;
         doc_count += 1;
         total_tokens += token_len as u64;
+
+        // Payload index rows for indexed fields — blind puts, same batch.
+        for field in &indexed_fields {
+            if let Some(v) = r.metadata.get(field) {
+                batch.put_cf(pidx_cf, keys::pidx_key(field, v, &id), []);
+            }
+        }
 
         let doc = StoredDoc {
             id: id.clone(),
@@ -425,13 +449,21 @@ fn dense_blocking(
     query: &Embedding,
     top_k: usize,
     fetch_payload: bool,
+    rescore: bool,
 ) -> Result<Vec<Candidate>> {
+    // Quantized graphs return approximate scores; over-fetch, then rescore
+    // the candidates exactly from the durable vectors before cutting to k.
+    let fetch = if rescore {
+        top_k.saturating_mul(2)
+    } else {
+        top_k
+    };
     let mut scored: Vec<(String, f32)>;
     {
         let graph = ann.read().expect("ann lock");
         if graph.len() >= ANN_MIN_CORPUS {
             scored = graph
-                .search(query, top_k, top_k.max(64))
+                .search(query, fetch, fetch.max(64))
                 .into_iter()
                 .map(|(id, score)| (id.as_str().to_string(), score))
                 .collect();
@@ -446,6 +478,17 @@ fn dense_blocking(
                     !masked.contains(id.as_str()) && !overlaid.contains(id.as_str())
                 });
                 scored.extend(ups.into_iter().map(|(id, s)| (id.as_str().to_string(), s)));
+                scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                scored.truncate(fetch);
+            }
+
+            if rescore {
+                let vecs_cf = db.cf(CF_VECS)?;
+                for (id, s) in scored.iter_mut() {
+                    if let Some(bytes) = db.0.get_cf(vecs_cf, id.as_bytes()).map_err(rocks_err)? {
+                        *s = query.cosine(&Embedding(keys::decode_vec(&bytes)));
+                    }
+                }
                 scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 scored.truncate(top_k);
             }
@@ -519,6 +562,12 @@ fn remove_blocking(db: &Db, id: &str) -> Result<()> {
     let terms_cf = db.cf(CF_TERMS)?;
     for term in content_tokens(&old.text) {
         batch.delete_cf(terms_cf, keys::term_key(&term, id));
+    }
+    let pidx_cf = db.cf(CF_PIDX)?;
+    for field in crate::filter::indexed_fields(db)? {
+        if let Some(v) = old.metadata.get(&field) {
+            batch.delete_cf(pidx_cf, keys::pidx_key(&field, v, id));
+        }
     }
     batch.delete_cf(db.cf(CF_DOCS)?, id.as_bytes());
     batch.delete_cf(db.cf(CF_VECS)?, id.as_bytes());

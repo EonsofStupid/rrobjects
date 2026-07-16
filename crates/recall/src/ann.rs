@@ -32,6 +32,9 @@ pub struct AnnConfig {
     pub ef_construction: usize,
     /// Default beam width while searching (callers may pass larger).
     pub ef_search: usize,
+    /// Store vectors as SQ8 codes (~4× smaller). Scores become approximate;
+    /// callers holding the full-precision vectors elsewhere should rescore.
+    pub quantized: bool,
 }
 
 impl Default for AnnConfig {
@@ -40,6 +43,75 @@ impl Default for AnnConfig {
             m: 16,
             ef_construction: 100,
             ef_search: 64,
+            quantized: false,
+        }
+    }
+}
+
+/// Vector storage: full-precision f32 or SQ8 codes with per-vector params.
+enum Store {
+    Full(Vec<f32>),
+    Sq8 {
+        codes: Vec<u8>,
+        params: Vec<crate::quant::SqParams>,
+    },
+}
+
+impl Store {
+    fn push(&mut self, v: &[f32]) {
+        match self {
+            Store::Full(vectors) => vectors.extend_from_slice(v),
+            Store::Sq8 { codes, params } => {
+                params.push(crate::quant::quantize_into(v, codes));
+            }
+        }
+    }
+
+    /// Dot of `node`'s stored vector with a full-precision query.
+    fn dot_query(&self, node: u32, dim: usize, q: &[f32], qsum: f32) -> f32 {
+        let start = node as usize * dim;
+        match self {
+            Store::Full(vectors) => rrf_core::simd::dot(&vectors[start..start + dim], q),
+            Store::Sq8 { codes, params } => {
+                crate::quant::dot_query(&codes[start..start + dim], &params[node as usize], q, qsum)
+            }
+        }
+    }
+
+    /// Dot between two stored vectors.
+    fn dot_nodes(&self, a: u32, b: u32, dim: usize) -> f32 {
+        let (sa, sb) = (a as usize * dim, b as usize * dim);
+        match self {
+            Store::Full(vectors) => {
+                rrf_core::simd::dot(&vectors[sa..sa + dim], &vectors[sb..sb + dim])
+            }
+            Store::Sq8 { codes, params } => crate::quant::dot_codes(
+                &codes[sa..sa + dim],
+                &params[a as usize],
+                &codes[sb..sb + dim],
+                &params[b as usize],
+            ),
+        }
+    }
+
+    /// The (possibly lossy) full-precision vector of `node`.
+    fn materialize(&self, node: u32, dim: usize) -> Vec<f32> {
+        let start = node as usize * dim;
+        match self {
+            Store::Full(vectors) => vectors[start..start + dim].to_vec(),
+            Store::Sq8 { codes, params } => {
+                crate::quant::decode(&codes[start..start + dim], &params[node as usize])
+            }
+        }
+    }
+
+    /// Bytes held by vector storage.
+    fn bytes(&self) -> usize {
+        match self {
+            Store::Full(vectors) => vectors.len() * 4,
+            Store::Sq8 { codes, params } => {
+                codes.len() + params.len() * std::mem::size_of::<crate::quant::SqParams>()
+            }
         }
     }
 }
@@ -67,8 +139,8 @@ impl Ord for Scored {
 pub struct AnnIndex {
     config: AnnConfig,
     dim: Option<usize>,
-    /// Flattened, normalized vectors (node * dim).
-    vectors: Vec<f32>,
+    /// Flattened, normalized vector storage (node * dim), f32 or SQ8.
+    store: Store,
     /// External ids by node.
     ids: Vec<Id>,
     /// External id → node.
@@ -88,10 +160,18 @@ pub struct AnnIndex {
 impl AnnIndex {
     /// An empty graph.
     pub fn new(config: AnnConfig) -> Self {
+        let store = if config.quantized {
+            Store::Sq8 {
+                codes: Vec::new(),
+                params: Vec::new(),
+            }
+        } else {
+            Store::Full(Vec::new())
+        };
         AnnIndex {
             config,
             dim: None,
-            vectors: Vec::new(),
+            store,
             ids: Vec::new(),
             by_id: HashMap::new(),
             deleted: Vec::new(),
@@ -112,14 +192,21 @@ impl AnnIndex {
         self.live == 0
     }
 
-    fn vec_of(&self, node: u32) -> &[f32] {
-        let d = self.dim.unwrap_or(0);
-        let start = node as usize * d;
-        &self.vectors[start..start + d]
+    /// Whether vector storage is SQ8 (scores approximate — rescore if the
+    /// full-precision vectors are available elsewhere).
+    pub fn is_quantized(&self) -> bool {
+        self.config.quantized
     }
 
-    fn dist_to(&self, node: u32, query: &[f32]) -> f32 {
-        1.0 - rrf_core::simd::dot(self.vec_of(node), query)
+    /// Bytes held by vector storage (graph links excluded).
+    pub fn vector_bytes(&self) -> usize {
+        self.store.bytes()
+    }
+
+    fn dist_to(&self, node: u32, query: &[f32], qsum: f32) -> f32 {
+        1.0 - self
+            .store
+            .dot_query(node, self.dim.unwrap_or(0), query, qsum)
     }
 
     fn next_level(&mut self) -> usize {
@@ -151,7 +238,7 @@ impl AnnIndex {
 
         let node = self.ids.len() as u32;
         let level = self.next_level();
-        self.vectors.extend_from_slice(v);
+        self.store.push(v);
         self.ids.push(id.clone());
         self.by_id.insert(id, node);
         self.deleted.push(false);
@@ -164,16 +251,17 @@ impl AnnIndex {
         };
 
         let query: Vec<f32> = v.to_vec();
+        let qsum: f32 = query.iter().sum();
 
         // Greedy descent through layers above the new node's level.
         for layer in ((level + 1)..=top).rev() {
-            cur = self.greedy_at(&query, cur, layer);
+            cur = self.greedy_at(&query, qsum, cur, layer);
         }
 
         // Beam-connect at each shared layer.
         let ef = self.config.ef_construction;
         for layer in (0..=level.min(top)).rev() {
-            let found = self.beam(&query, cur, layer, ef, /*include_deleted*/ true);
+            let found = self.beam(&query, qsum, cur, layer, ef, /*include_deleted*/ true);
             let max_links = if layer == 0 {
                 self.config.m * 2
             } else {
@@ -218,12 +306,13 @@ impl AnnIndex {
         }
         let q = query.normalized();
         let q = q.as_slice();
+        let qsum: f32 = q.iter().sum();
 
         for layer in (1..=top).rev() {
-            cur = self.greedy_at(q, cur, layer);
+            cur = self.greedy_at(q, qsum, cur, layer);
         }
         let ef = ef.max(self.config.ef_search).max(k);
-        let found = self.beam(q, cur, 0, ef, /*include_deleted*/ false);
+        let found = self.beam(q, qsum, cur, 0, ef, /*include_deleted*/ false);
 
         found
             .into_iter()
@@ -233,14 +322,14 @@ impl AnnIndex {
     }
 
     /// Greedy hill-climb at one layer: move to any closer neighbor until none.
-    fn greedy_at(&self, query: &[f32], start: u32, layer: usize) -> u32 {
+    fn greedy_at(&self, query: &[f32], qsum: f32, start: u32, layer: usize) -> u32 {
         let mut cur = start;
-        let mut cur_dist = self.dist_to(cur, query);
+        let mut cur_dist = self.dist_to(cur, query, qsum);
         loop {
             let mut improved = false;
             if let Some(neigh) = self.links[cur as usize].get(layer) {
                 for &nb in neigh {
-                    let d = self.dist_to(nb, query);
+                    let d = self.dist_to(nb, query, qsum);
                     if d < cur_dist {
                         cur = nb;
                         cur_dist = d;
@@ -260,6 +349,7 @@ impl AnnIndex {
     fn beam(
         &self,
         query: &[f32],
+        qsum: f32,
         start: u32,
         layer: usize,
         ef: usize,
@@ -268,7 +358,7 @@ impl AnnIndex {
         let mut visited = vec![false; self.ids.len()];
         visited[start as usize] = true;
 
-        let start_dist = self.dist_to(start, query);
+        let start_dist = self.dist_to(start, query, qsum);
         // Candidates: min-heap by distance (explore closest first).
         let mut candidates: BinaryHeap<std::cmp::Reverse<Scored>> = BinaryHeap::new();
         candidates.push(std::cmp::Reverse(Scored {
@@ -295,7 +385,7 @@ impl AnnIndex {
                         continue;
                     }
                     visited[nb as usize] = true;
-                    let d = self.dist_to(nb, query);
+                    let d = self.dist_to(nb, query, qsum);
                     let worst = results.peek().map(|s| s.dist).unwrap_or(f32::INFINITY);
                     if d < worst || results.len() < ef {
                         candidates.push(std::cmp::Reverse(Scored { dist: d, node: nb }));
@@ -318,13 +408,14 @@ impl AnnIndex {
     /// Diversity heuristic: keep a candidate only if it is closer to the
     /// query than to every already-kept neighbor.
     fn select_diverse(&self, sorted: &[Scored], m: usize) -> Vec<Scored> {
+        let d = self.dim.unwrap_or(0);
         let mut kept: Vec<Scored> = Vec::with_capacity(m);
         for c in sorted {
             if kept.len() >= m {
                 break;
             }
             let dominated = kept.iter().any(|s| {
-                let dot = rrf_core::simd::dot(self.vec_of(c.node), self.vec_of(s.node));
+                let dot = self.store.dot_nodes(c.node, s.node, d);
                 (1.0 - dot) < c.dist
             });
             if !dominated {
@@ -353,11 +444,12 @@ impl AnnIndex {
 
     /// Re-select a node's neighbor list down to `max_links`.
     fn prune(&mut self, node: u32, layer: usize, max_links: usize) {
-        let query: Vec<f32> = self.vec_of(node).to_vec();
+        let query = self.store.materialize(node, self.dim.unwrap_or(0));
+        let qsum: f32 = query.iter().sum();
         let mut scored: Vec<Scored> = self.links[node as usize][layer]
             .iter()
             .map(|&nb| Scored {
-                dist: self.dist_to(nb, &query),
+                dist: self.dist_to(nb, &query, qsum),
                 node: nb,
             })
             .collect();
@@ -437,6 +529,57 @@ mod tests {
         }
         let recall = found as f64 / total as f64;
         assert!(recall >= 0.95, "recall@10 = {recall:.3}, gate is 0.95");
+    }
+
+    #[test]
+    fn quantized_recall_gate_and_memory() {
+        let n = 5000;
+        let dim = 64;
+        let mut idx = AnnIndex::new(AnnConfig {
+            quantized: true,
+            ..AnnConfig::default()
+        });
+        let mut vecs = Vec::with_capacity(n);
+        for i in 0..n {
+            let e = Embedding(pseudo_vec(i as u64, dim));
+            idx.insert(Id::new(format!("v{i}")), &e);
+            vecs.push(e.normalized());
+        }
+        let full_bytes = n * dim * 4;
+        let sq_bytes = idx.vector_bytes();
+        assert!(idx.is_quantized());
+        assert!(
+            sq_bytes * 3 < full_bytes,
+            "SQ8 must shrink vector memory ≥3×: {sq_bytes} vs {full_bytes}"
+        );
+
+        let queries = 100;
+        let mut found = 0usize;
+        let mut total = 0usize;
+        for qi in 0..queries {
+            let q = Embedding(pseudo_vec(1_000_000 + qi as u64, dim));
+            let truth = exact_top_k(&vecs, &q, 10);
+            let ann: Vec<String> = idx
+                .search(&q, 10, 128)
+                .into_iter()
+                .map(|(id, _)| id.as_str().to_string())
+                .collect();
+            for t in truth {
+                total += 1;
+                if ann.iter().any(|id| id == &format!("v{t}")) {
+                    found += 1;
+                }
+            }
+        }
+        let recall = found as f64 / total as f64;
+        println!(
+            "SQ8 GATE — recall@10 {recall:.3}, vector bytes {sq_bytes} vs full {full_bytes} ({:.1}x smaller)",
+            full_bytes as f64 / sq_bytes as f64
+        );
+        assert!(
+            recall >= 0.90,
+            "quantized recall@10 = {recall:.3}, gate is 0.90"
+        );
     }
 
     #[test]

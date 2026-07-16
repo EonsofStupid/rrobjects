@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 mod estate;
+mod filter;
 pub mod index;
 pub mod keys;
 pub mod model;
@@ -26,7 +27,8 @@ mod query;
 mod rels;
 mod store;
 
-pub use estate::Estate;
+pub use estate::{Estate, EstateConfig};
+pub use filter::{Condition, Filter};
 pub use index::{Bm25Params, Posting, Postings};
 pub use model::{
     now_ms, now_ns, Change, ChangeOp, ConnectorInfo, ConnectorKind, EstateInfo, NodeInfo, Shape,

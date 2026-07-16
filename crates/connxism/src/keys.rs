@@ -22,6 +22,7 @@
 /// All column families, in creation order.
 pub const COLUMN_FAMILIES: &[&str] = &[
     CF_META, CF_NODES, CF_CONNS, CF_DOCS, CF_VECS, CF_TERMS, CF_TAGS, CF_TRENDS, CF_RELS, CF_FEED,
+    CF_PIDX,
 ];
 
 /// Estate metadata + counters.
@@ -44,6 +45,8 @@ pub const CF_TRENDS: &str = "trends";
 pub const CF_RELS: &str = "rels";
 /// Durable changefeed: seq (u64 BE) → JSON change record.
 pub const CF_FEED: &str = "feed";
+/// Payload secondary indexes: `field \x00 typed-value \x00 doc_id` → empty.
+pub const CF_PIDX: &str = "pidx";
 
 /// meta: the estate info blob.
 pub const META_ESTATE: &[u8] = b"estate";
@@ -55,6 +58,8 @@ pub const META_TOTAL_TOKENS: &[u8] = b"total_tokens";
 pub const META_SHAPES: &[u8] = b"shapes";
 /// meta: next changefeed sequence number (u64 LE).
 pub const META_FEED_SEQ: &[u8] = b"feed_seq";
+/// meta: JSON array of payload-indexed metadata field names.
+pub const META_PIDX: &[u8] = b"payload_indexes";
 
 /// Separator between compound-key segments (never appears in ids/tags/metrics).
 pub const SEP: u8 = 0x00;
@@ -169,6 +174,108 @@ pub fn rel_suffix(key: &[u8], prefix_len: usize) -> Option<(String, String)> {
     ))
 }
 
+// ---- payload secondary index keys ------------------------------------------
+//
+// Row: `field \x00 typed-value \x00 doc_id` → empty (presence = membership).
+// The typed value is a one-byte tag + an order-preserving encoding, so a
+// sorted prefix scan under `field \x00 n` walks numbers in numeric order —
+// range filters are index scans, not table scans. Document ids must not
+// contain NUL (already the rule for tags and terms).
+
+/// Type tag: number (order-preserving 8-byte encoding follows).
+pub const PIDX_NUM: u8 = b'n';
+/// Type tag: string (raw UTF-8 bytes follow).
+pub const PIDX_STR: u8 = b's';
+/// Type tag: boolean (one byte, 0/1).
+pub const PIDX_BOOL: u8 = b'b';
+/// Type tag: anything else (canonical JSON text follows).
+pub const PIDX_OTHER: u8 = b'o';
+
+/// Order-preserving byte encoding of an `f64`: negative values invert all
+/// bits, non-negative values flip the sign bit — lexicographic byte order
+/// equals numeric order.
+pub fn encode_f64_sortable(x: f64) -> [u8; 8] {
+    let bits = x.to_bits();
+    let mapped = if bits & (1 << 63) != 0 {
+        !bits
+    } else {
+        bits | (1 << 63)
+    };
+    mapped.to_be_bytes()
+}
+
+/// Inverse of [`encode_f64_sortable`].
+pub fn decode_f64_sortable(b: [u8; 8]) -> f64 {
+    let mapped = u64::from_be_bytes(b);
+    let bits = if mapped & (1 << 63) != 0 {
+        mapped & !(1 << 63)
+    } else {
+        !mapped
+    };
+    f64::from_bits(bits)
+}
+
+/// Typed, order-preserving encoding of a metadata value (tag + payload).
+pub fn encode_pidx_value(value: &serde_json::Value) -> Vec<u8> {
+    match value {
+        serde_json::Value::Number(n) => {
+            let mut out = Vec::with_capacity(9);
+            out.push(PIDX_NUM);
+            out.extend_from_slice(&encode_f64_sortable(n.as_f64().unwrap_or(0.0)));
+            out
+        }
+        serde_json::Value::String(s) => {
+            let mut out = Vec::with_capacity(1 + s.len());
+            out.push(PIDX_STR);
+            out.extend_from_slice(s.as_bytes());
+            out
+        }
+        serde_json::Value::Bool(b) => vec![PIDX_BOOL, u8::from(*b)],
+        other => {
+            let text = other.to_string();
+            let mut out = Vec::with_capacity(1 + text.len());
+            out.push(PIDX_OTHER);
+            out.extend_from_slice(text.as_bytes());
+            out
+        }
+    }
+}
+
+/// Full payload-index row key: `field \x00 typed-value \x00 doc_id`.
+pub fn pidx_key(field: &str, value: &serde_json::Value, doc_id: &str) -> Vec<u8> {
+    let enc = encode_pidx_value(value);
+    let mut k = Vec::with_capacity(field.len() + 1 + enc.len() + 1 + doc_id.len());
+    k.extend_from_slice(field.as_bytes());
+    k.push(SEP);
+    k.extend_from_slice(&enc);
+    k.push(SEP);
+    k.extend_from_slice(doc_id.as_bytes());
+    k
+}
+
+/// Prefix scanning every row of one field (all values, all types).
+pub fn pidx_field_prefix(field: &str) -> Vec<u8> {
+    prefix(field)
+}
+
+/// Prefix scanning every document carrying exactly `value` in `field`.
+pub fn pidx_value_prefix(field: &str, value: &serde_json::Value) -> Vec<u8> {
+    let enc = encode_pidx_value(value);
+    let mut k = Vec::with_capacity(field.len() + 1 + enc.len() + 1);
+    k.extend_from_slice(field.as_bytes());
+    k.push(SEP);
+    k.extend_from_slice(&enc);
+    k.push(SEP);
+    k
+}
+
+/// Prefix under which all *numeric* rows of `field` sort in numeric order.
+pub fn pidx_num_prefix(field: &str) -> Vec<u8> {
+    let mut k = prefix(field);
+    k.push(PIDX_NUM);
+    k
+}
+
 /// Encode an embedding as little-endian f32 bytes.
 pub fn encode_vec(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
@@ -201,6 +308,40 @@ mod tests {
         let a = trend_key("qps", 1);
         let b = trend_key("qps", 2);
         let c = trend_key("qps", 10);
+        assert!(a < b && b < c);
+    }
+
+    #[test]
+    fn f64_sortable_encoding_orders_numerically() {
+        let vals = [
+            f64::NEG_INFINITY,
+            -1e9,
+            -3.5,
+            -0.0,
+            0.0,
+            0.001,
+            42.0,
+            1e12,
+            f64::INFINITY,
+        ];
+        for w in vals.windows(2) {
+            assert!(
+                encode_f64_sortable(w[0]) <= encode_f64_sortable(w[1]),
+                "{} !<= {}",
+                w[0],
+                w[1]
+            );
+        }
+        for v in vals {
+            assert_eq!(decode_f64_sortable(encode_f64_sortable(v)), v);
+        }
+    }
+
+    #[test]
+    fn pidx_numeric_rows_sort_by_value() {
+        let a = pidx_key("priority", &serde_json::json!(-2), "d1");
+        let b = pidx_key("priority", &serde_json::json!(0), "d1");
+        let c = pidx_key("priority", &serde_json::json!(10), "d1");
         assert!(a < b && b < c);
     }
 

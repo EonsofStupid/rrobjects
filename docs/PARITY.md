@@ -48,7 +48,7 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Search matrix (pairs/offsets similarity matrix) | analytics over recall | ⬜ P5 |
 | Facet (value counts over payload field) | `Estate::facet` (exact, v1 scan) | ✅ |
 | Random sampling | recall sampling | ⬜ P5 |
-| Score threshold / offset / with_payload / with_vectors selectors | query options | 🔨 P3 |
+| Score threshold / offset / with_payload / with_vectors selectors | `EstateQuery::threshold` + `ids_only` (lean payload) | ✅ threshold/payload; offset/with_vectors 🔨 |
 
 ### A4. Index & storage internals
 | Capability | rrf home | Status |
@@ -56,11 +56,11 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Distance metrics: Cosine ✅, Dot, Euclid, Manhattan | `rrf-core::Embedding` + SIMD kernels | ✅ cosine/dot → 🔨 P2 rest |
 | HNSW-class ANN graph (m, ef_construct, ef) | `recall::AnnIndex` (recall@10 ≥ 0.95 gated; out-of-band build) | ✅ |
 | Plain (exact) index fallback | `FlatRecall` / estate scan | ✅ |
-| Quantization: scalar u8 / PQ / binary / 1.5-bit+2-bit (TQ) | `recall::quant` | 🔨 P2 (scalar) → P2.5 |
+| Quantization: scalar u8 / PQ / binary / 1.5-bit+2-bit (TQ) | `recall::quant` SQ8 + exact rescore from durable vectors (recall@10 0.976 measured, 3.4× smaller) | ✅ scalar; PQ/binary 🔨 P2.5 |
 | Sparse vectors + sparse index (inverted, on-disk variants) | weighted postings (`connxism`) | ✅ BM25 form → 🔨 P2 weighted |
 | Multi-vector per point (named vectors, late-interaction/ColBERT-style) | multi-vector records | ⬜ P2.5 |
-| Payload field indexes ×8: keyword, integer, float, bool, geo, text (full-text), datetime, uuid | estate secondary indexes (`idx` CFs) | 🔨 P2/P3 |
-| Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | `EstateQuery` equality-must (over-fetch post-filter) | ✅ core; range/should/nested 🔨 P3 tail |
+| Payload field indexes ×8: keyword, integer, float, bool, geo, text (full-text), datetime, uuid | `pidx` CF, order-preserving typed keys (keyword/int/float/bool ✅, 9.8× vs scan measured) | ✅ core; geo/datetime/uuid/full-text 🔨 |
+| Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | `Filter` (must/should/must_not × eq/any/range/exists), filter-first via `pidx` or post-filter | ✅; geo/nested 🔨 |
 | Text index w/ tokenizers (word/whitespace/prefix/multilingual, stemmer, stopwords) | `rrf-core::text` grows analyzer support | 🔨 P3 |
 | Geo index (radius/box/polygon) | estate geo CF | ⬜ P3 |
 | WAL + flush/ack semantics | RocksDB WAL (✅ via estate) + explicit ack | ✅ base → 🔨 P5 semantics |
