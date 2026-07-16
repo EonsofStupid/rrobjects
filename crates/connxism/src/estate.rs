@@ -657,3 +657,40 @@ impl Estate {
         Ok(reservoir)
     }
 }
+
+impl Estate {
+    /// Create (or repoint) an alias to a collection. The whole alias map
+    /// writes as one blob, so a repoint (alias switch) is atomic: every
+    /// query sees either the old target or the new one, never neither.
+    pub fn create_alias(&self, alias: &str, collection: &str) -> Result<()> {
+        let mut aliases: std::collections::BTreeMap<String, String> = self
+            .db
+            .get_json(CF_META, keys::META_ALIASES)?
+            .unwrap_or_default();
+        aliases.insert(alias.to_string(), collection.to_string());
+        self.db.put_json(CF_META, keys::META_ALIASES, &aliases)?;
+        rrf_core::events::emit(
+            "estate.alias",
+            serde_json::json!({ "alias": alias, "collection": collection }),
+        );
+        Ok(())
+    }
+
+    /// The alias map (alias → collection).
+    pub fn aliases(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(self
+            .db
+            .get_json(CF_META, keys::META_ALIASES)?
+            .unwrap_or_default())
+    }
+
+    /// Delete an alias (the underlying collection is untouched).
+    pub fn delete_alias(&self, alias: &str) -> Result<()> {
+        let mut aliases: std::collections::BTreeMap<String, String> = self
+            .db
+            .get_json(CF_META, keys::META_ALIASES)?
+            .unwrap_or_default();
+        aliases.remove(alias);
+        self.db.put_json(CF_META, keys::META_ALIASES, &aliases)
+    }
+}

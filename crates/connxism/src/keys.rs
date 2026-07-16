@@ -352,6 +352,9 @@ pub fn coll_prefix(collection: &str) -> Vec<u8> {
 /// meta: JSON array of collection names.
 pub const META_COLLECTIONS: &[u8] = b"collections";
 
+/// meta: JSON map `alias → collection name`.
+pub const META_ALIASES: &[u8] = b"aliases";
+
 /// Encode a named-vector row key: `space \x00 doc_id`.
 pub fn nvec_key(space: &str, doc_id: &str) -> Vec<u8> {
     compound(space, doc_id)

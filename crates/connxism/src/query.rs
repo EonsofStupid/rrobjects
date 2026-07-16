@@ -56,7 +56,8 @@ impl ConnXRecall {
         let scope: Option<Vec<String>> = match (&q.collection, &q.scope) {
             (None, s) => s.clone(),
             (Some(coll), s) => {
-                let members = self.collection_members_blocking(coll).await?;
+                let coll = self.resolve_alias(coll).await?;
+                let members = self.collection_members_blocking(&coll).await?;
                 match s {
                     None => Some(members),
                     Some(explicit) => {
@@ -200,6 +201,20 @@ impl ConnXRecall {
             }
         }
         Ok(results)
+    }
+
+    /// Resolve a collection alias to its target (or pass the name through).
+    async fn resolve_alias(&self, name: &str) -> Result<String> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let aliases: std::collections::BTreeMap<String, String> = db
+                .get_json(crate::keys::CF_META, crate::keys::META_ALIASES)?
+                .unwrap_or_default();
+            Ok(aliases.get(&name).cloned().unwrap_or(name))
+        })
+        .await
+        .map_err(|e| rrf_core::RrfError::Recall(format!("join: {e}")))?
     }
 
     /// One collection's member ids, off the blocking pool.

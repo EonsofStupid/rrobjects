@@ -930,3 +930,103 @@ pub(crate) fn remove_blocking(
 
     db.0.write(batch).map_err(rocks_err)
 }
+
+impl ConnXRecall {
+    /// Merge keys into a document's metadata (existing keys overwrite).
+    pub async fn set_payload(&self, id: &str, patch: rrf_core::Metadata) -> Result<()> {
+        self.mutate_payload(id, move |m| {
+            for (k, v) in patch {
+                m.insert(k, v);
+            }
+        })
+        .await
+    }
+
+    /// Replace a document's metadata entirely.
+    pub async fn overwrite_payload(&self, id: &str, meta: rrf_core::Metadata) -> Result<()> {
+        self.mutate_payload(id, move |m| *m = meta).await
+    }
+
+    /// Remove specific keys from a document's metadata.
+    pub async fn delete_payload_keys(&self, id: &str, keys: Vec<String>) -> Result<()> {
+        self.mutate_payload(id, move |m| {
+            for k in &keys {
+                m.remove(k);
+            }
+        })
+        .await
+    }
+
+    /// Clear a document's metadata entirely.
+    pub async fn clear_payload(&self, id: &str) -> Result<()> {
+        self.mutate_payload(id, |m| m.clear()).await
+    }
+
+    /// The shared payload-mutation path: one WriteBatch carrying the
+    /// rewritten doc, exact pidx retraction/rewrite for indexed fields,
+    /// the shape-census adjustment, and a changefeed row — atomic.
+    async fn mutate_payload(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut rrf_core::Metadata) + Send + 'static,
+    ) -> Result<()> {
+        let _guard = self.writer.lock().await;
+        let db = self.db.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let Some(mut doc) = db.get_json::<StoredDoc>(CF_DOCS, id.as_bytes())? else {
+                return Err(RrfError::Recall(format!("no such document: {id}")));
+            };
+            let mut batch = rocksdb::WriteBatch::default();
+            let pidx_cf = db.cf(CF_PIDX)?;
+            let indexed = crate::filter::indexed_fields(&db)?;
+
+            // Retract old index rows, adjust the census out.
+            for field in &indexed {
+                if let Some(v) = doc.metadata.get(field) {
+                    batch.delete_cf(pidx_cf, keys::pidx_key(field, v, &id));
+                }
+            }
+            let mut shapes: BTreeMap<String, u64> =
+                db.get_json(CF_META, META_SHAPES)?.unwrap_or_default();
+            if let Some(n) = shapes.get_mut(&doc.shape.key()) {
+                *n = n.saturating_sub(1);
+            }
+
+            // Apply the mutation, re-derive the shape, rewrite rows.
+            f(&mut doc.metadata);
+            doc.shape = Shape::of(&doc.metadata);
+            *shapes.entry(doc.shape.key()).or_insert(0) += 1;
+            for field in &indexed {
+                if let Some(v) = doc.metadata.get(field) {
+                    batch.put_cf(pidx_cf, keys::pidx_key(field, v, &id), []);
+                }
+            }
+            batch.put_cf(db.cf(CF_DOCS)?, id.as_bytes(), serde_json::to_vec(&doc)?);
+
+            // Changefeed row, atomic with the mutation.
+            let mut feed_seq = db.get_u64(META_FEED_SEQ)?;
+            let change = crate::model::Change {
+                seq: feed_seq,
+                op: crate::model::ChangeOp::Upsert,
+                doc_id: id.clone(),
+                at: crate::model::now_ms(),
+            };
+            batch.put_cf(
+                db.cf(CF_FEED)?,
+                feed_seq.to_be_bytes(),
+                serde_json::to_vec(&change)?,
+            );
+            feed_seq += 1;
+            let meta_cf = db.cf(CF_META)?;
+            batch.put_cf(meta_cf, META_FEED_SEQ, feed_seq.to_le_bytes());
+            batch.put_cf(meta_cf, META_SHAPES, serde_json::to_vec(&shapes)?);
+
+            db.0.write(batch).map_err(rocks_err)
+        })
+        .await
+        .map_err(|e| RrfError::Recall(format!("join: {e}")))??;
+        self.feed_notify.notify_waiters();
+        Ok(())
+    }
+}

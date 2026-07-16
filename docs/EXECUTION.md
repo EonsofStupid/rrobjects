@@ -152,6 +152,14 @@ paths); geo/datetime/uuid/full-text payload index types; nested filters.
 | 6 | `query_batch` + Euclid/Manhattan metrics on `Embedding` | ✅ batch ≡ sequential (asserted) | ✅ |
 | 7 | Green close + docs + push | fmt/clippy/test: 0 warnings, 41 suites green | ✅ |
 
+## Sprint 18 — Aliases + per-point payload CRUD
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | Alias registry (`META_ALIASES` map, atomic single-blob writes): create/list/switch/delete; `EstateQuery.collection` resolves aliases everywhere a collection name is accepted | alias query returns the target's docs; switch atomically redirects the same query to the new target without touching data; delete restores literal behavior | ✅ |
+| 2 | Payload ops per point (writer-serialized, one WriteBatch each): `set_payload` (merge), `overwrite_payload`, `delete_payload_keys`, `clear_payload` — pidx rows retracted/rewritten exactly, shape census maintained, changefeed row appended atomically | `ids_where` before/after each op reflects exactly the change; feed grows by one row per op; doc metadata asserted after each op | ✅ |
+| 3 | Green close: fmt/clippy/test, PARITY rows (A1 aliases, A2 payload ops), BENCHMARKS note, push | full workspace green | ✅ |
+
 ## Sprint 17 — Query-plane completions: offset, with_vectors, sampling, matrix
 
 | # | Step | Verification gate | Status |

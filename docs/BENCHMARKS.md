@@ -372,3 +372,16 @@ deterministic seeded reservoir over the doc CF (reproducible, distinct,
 n>corpus → whole corpus); `similarity_matrix(ids)` returns the pairwise
 cosine upper triangle over stored vectors, skipping unknown ids (gated
 against direct cosine, 1e-6).
+
+## Sprint 18: aliases + per-point payload CRUD (2026-07-16)
+
+Aliases: a single-blob alias map (create/list/switch/delete) resolved
+anywhere a collection name is accepted — a repoint is atomic, so the same
+live query flips from one collection to another without touching data
+(gated). Payload CRUD per point: `set_payload` (merge),
+`overwrite_payload`, `delete_payload_keys`, `clear_payload` — each is one
+WriteBatch carrying the rewritten doc, exact payload-index
+retraction/rewrite, the shape-census adjustment, and a changefeed row.
+Gates assert the index-resolved id-sets before/after every op (old rows
+gone, new rows live, siblings untouched), one feed row per op, and that
+mutating a missing doc errors.

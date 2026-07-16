@@ -22,7 +22,7 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 |---|---|---|
 | Create / list / get / update / delete collections | estates ✅ + named collections in one estate (`coll` CF membership, auto-registered, exact counts, leak-proof scoped queries over the wire, drop with full retraction) | ✅ |
 | Collection exists / info | `connxism::Estate::info` | ✅ partial |
-| Aliases (create/list/switch) | estate alias registry | ⬜ P5 |
+| Aliases (create/list/switch) | alias map (atomic single-blob writes — switch redirects live queries without touching data; resolved anywhere a collection name is accepted) | ✅ |
 | Optimizer status + config (`/optimizations`) | segment maintenance (`connxism`) | 🔨 P5 |
 | Cluster info / shard keys / move shard | mesh scale-out | ⬜ P8 |
 
@@ -32,7 +32,7 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Upsert / get / delete points (REST+gRPC, wait/ordering) | `Recall::upsert/remove` + a2a `index` | ✅ core |
 | Batch update ops (`points/batch`, UpdateBatch) | ingestion machine batches | ✅ |
 | Update / delete named vectors per point | `nvecs` rows retract exactly on overwrite/remove via `StoredDoc.named_spaces` (gated: dropped name retracts, sibling spaces untouched) | ✅ |
-| Set / overwrite / delete / clear payload | `connxism` doc metadata ops | 🔨 P3 |
+| Set / overwrite / delete / clear payload | `set_payload`/`overwrite_payload`/`delete_payload_keys`/`clear_payload` — one WriteBatch each: exact pidx retract/rewrite, shape census, changefeed row (gated via index-resolved id-sets) | ✅ |
 | Scroll (paginated listing w/ filter) | `Estate::scroll` (cursor-paged) | ✅ |
 | Count (exact/approx w/ filter) | `Estate::count` (filtered + free total) | ✅ |
 
