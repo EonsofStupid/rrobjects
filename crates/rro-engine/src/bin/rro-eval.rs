@@ -187,6 +187,21 @@ async fn run() -> anyhow::Result<()> {
         docs.len() as f64 / embed_secs
     );
 
+    // RRO_EVAL_EXPORT_VECTORS: dump the REAL embeddings we just paid for, so the
+    // ANN ef sweep (crates/recall/tests/real_vector_ef.rs) can re-tune against
+    // real vectors without re-running the model.
+    if let Ok(path) = std::env::var("RRO_EVAL_EXPORT_VECTORS") {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        for (d, e) in docs.iter().zip(embeddings.iter()) {
+            let line = serde_json::json!({
+                "kind": "doc", "id": d.id.as_str(), "vector": e.0,
+            });
+            writeln!(f, "{line}")?;
+        }
+        println!("exported {} real vectors -> {path}", docs.len());
+    }
+
     let records: Vec<VectorRecord> = docs
         .iter()
         .zip(embeddings)
