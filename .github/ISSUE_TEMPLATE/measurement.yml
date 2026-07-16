@@ -1,0 +1,56 @@
+name: Measurement challenge
+description: You think a published number is wrong, unfair, or unreproducible. Please do this.
+labels: ["measurement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This is the most welcome issue you can file.**
+
+        RRF's whole bet is that a fully-owned engine measured honestly beats a stack of
+        wrappers measured optimistically. That bet is only worth anything if the measurements
+        survive a skeptic. A number that can't be reproduced is a bug, and a benchmark that
+        flatters us is a worse bug than a slow query.
+
+        See **[`docs/BENCHMARKS.md`](../../blob/main/docs/BENCHMARKS.md)** for the protocol and
+        **[`docs/OBSERVABILITY.md`](../../blob/main/docs/OBSERVABILITY.md)** for the event stream.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What's wrong with it
+      options:
+        - I can't reproduce it
+        - The comparison isn't apples-to-apples
+        - The config is doing the work, not the engine
+        - The headline hides a cost elsewhere in the flow
+        - The accuracy/latency tradeoff isn't stated
+        - The protocol itself is flawed
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: claim
+    attributes:
+      label: Which claim
+      description: Quote it, and say where you found it — README, a doc, a baseline artifact, a commit.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Your evidence
+      description: |
+        What you ran and what you got. Baseline JSON and event stream if you have them —
+        config included.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: fair
+    attributes:
+      label: What a fair version would look like
+      description: If the measurement is unfair, what would you accept instead?

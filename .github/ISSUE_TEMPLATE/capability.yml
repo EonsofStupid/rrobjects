@@ -1,0 +1,67 @@
+name: Capability request
+description: Something the engine should be able to do, and can't yet.
+labels: ["capability"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: **[`docs/PARITY.md`](../../blob/main/docs/PARITY.md)** is the definitive
+        build list — the full union of capabilities, each mapped to its home crate and marked
+        ✅ built · 🔨 phase-assigned · ⬜ inventoried. **[`docs/ROADMAP.md`](../../blob/main/docs/ROADMAP.md)**
+        has the phase order.
+
+        If your capability is already inventoried there, say so and tell us why it should move
+        up — that's more useful than a new entry.
+
+  - type: textarea
+    id: capability
+    attributes:
+      label: The capability
+      description: What should the engine be able to do?
+    validations:
+      required: true
+
+  - type: input
+    id: parity
+    attributes:
+      label: Is it in PARITY.md already?
+      placeholder: "e.g. A3 — Recommend/RecommendBatch (⬜ P4) — or: not listed"
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: What it unblocks
+      description: |
+        The concrete thing you can't do today. Real use beats hypothetical completeness —
+        RRF is deliberately not a feature-parity race.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: home
+    attributes:
+      label: Which crate would own it
+      options:
+        - embedder
+        - recall
+        - reranker
+        - classifier / rrd
+        - connectome
+        - connxism
+        - connectors
+        - rrf-net
+        - rrf-flow
+        - rrf-core
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: measure
+    attributes:
+      label: How would we know it works
+      description: |
+        RRF's rule is that a claim needs evidence. If this capability has a right answer,
+        what does the measurement look like — accuracy at k, latency at a config, a gate?

@@ -1,0 +1,90 @@
+name: Bug report
+description: Something in the engine behaves incorrectly, or a number looks wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to look closely at RRF.
+
+        **Numbers need their configuration.** A latency or accuracy figure without the run
+        config it came from can't be acted on — RRF refuses to compare runs across unlike
+        configs for exactly this reason. If your report involves a measurement, please paste
+        the whole baseline JSON, not the headline.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      description: Which part of the flow?
+      options:
+        - embedder — perceive
+        - recall — vector memory / ANN / hybrid
+        - reranker — true-relevance ordering
+        - classifier / rrd — the reason-ready gate
+        - connectome — the map
+        - connxism — estates, storage, RocksDB
+        - connectors — ingest, changefeed, sync
+        - rrf-net — a2a / networking
+        - rrf-flow — the flow itself
+        - rrf-core — types, events, signals
+        - benchmarks / baselines
+        - docs
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did the engine do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Exact commands. The smaller the repro, the faster this gets fixed.
+      placeholder: |
+        cargo run -p rrf-bench -- --docs 50000 --queries 500 --store estate
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: events
+    attributes:
+      label: Event stream (if you have one)
+      description: |
+        Run with `RRF_EVENTS=/path/events.jsonl` (daemon) or `--events <path>` (rrf-bench)
+        and paste the relevant records. This is usually the fastest possible bug report.
+      render: json
+
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline JSON (if this is about a measurement)
+      description: The whole artifact — config included, not just the headline number.
+      render: json
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: |
+        rrf:      commit / tag
+        rustc:    rustc -Vv
+        OS/arch:  uname -a
+        hardware: CPU / RAM / GPU if relevant
+      render: text
+    validations:
+      required: true

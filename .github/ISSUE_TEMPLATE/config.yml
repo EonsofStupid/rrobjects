@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/EonsofStupid/rrf/security/advisories/new
+    about: Please report privately here, never as a public issue. See SECURITY.md.
+  - name: Architecture, the flow, and why it's not just RAG
+    url: https://github.com/EonsofStupid/rrf/blob/main/docs/ARCHITECTURE.md
+    about: How the engine is put together before you file — start here.
+  - name: PARITY — the definitive capability list
+    url: https://github.com/EonsofStupid/rrf/blob/main/docs/PARITY.md
+    about: Everything the engine intends to do, mapped to its home crate and marked built / scheduled / inventoried.
+  - name: BENCHMARKS — the measurement protocol
+    url: https://github.com/EonsofStupid/rrf/blob/main/docs/BENCHMARKS.md
+    about: How numbers are produced, and why a config always travels with its number.
