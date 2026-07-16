@@ -1,13 +1,21 @@
-# Reason Ready
+# Reason Ready Objects
 
-**RRF — Reason Ready Flow. Not just RAG. Intelligence.**
+**RRO — Reason Ready Objects. Not just a RAG engine. Intelligence.**
+**A turnkey solution granting your AI persistence.**
 
 One embedded, tokio-native retrieval-and-reasoning engine, clean-authored
 from a single root: no external database, no vector-store dependency, no
 model gateway, no wrappers. It gates and classifies at first touch, retrieves
 hybrid, reranks, judges whether what it found is enough to reason on, shows
 its work as a graph — and treats remote nodes as local over its own layer-2
-protocol. **Every claim below came out of a measured run in this tree.**
+protocol.
+
+> **Why RRO and not RRF.** "RRF" is **Reciprocal Rank Fusion** — a standard IR
+> term, and the exact thing this engine's own `hybrid_search` does. The product
+> name collided with its own algorithm, which is why it was unfindable. After
+> the rename every remaining `RRF` in this tree means the *algorithm* and
+> nothing else. The objects are the product: **Reason Ready Objects** are the
+> typed, grammar-conformant artifacts RRD produces at first touch.
 
 ```
         R R D  ─────────────  the instant first thing
@@ -107,7 +115,7 @@ cluster, deploy) is in **docs/ROADMAP_REAL.md**.
 ## Where everything stands
 
 - **docs/COMPARISON.md** — head-to-head vs the reference engines: what only
-  RRF has, their home turf measured, and the phased tail.
+  RRO has, their home turf measured, and the phased tail.
 - **docs/PARITY.md** — the exhaustive capability union, row-by-row status.
 - **docs/PLAN.md** / **docs/EXECUTION.md** — phases with gates; the
   plan→execute→verify loop with every sprint's evidence.

@@ -1,4 +1,4 @@
-# RRF vs the reference engines — the honest head-to-head
+# RRO vs the reference engines — the honest head-to-head
 
 > ⚠️ **SUPERSEDED — the accuracy numbers below are SYNTHETIC.**
 > They were produced by the deterministic hash embedder scoring synthetic
@@ -11,14 +11,14 @@
 
 
 
-Two axes matter: what RRF has **that neither reference engine has at all**,
-and where RRF stands on **their** home turf. Every ✅ below is backed by a
+Two axes matter: what RRO has **that neither reference engine has at all**,
+and where RRO stands on **their** home turf. Every ✅ below is backed by a
 test or a measured run in this tree; every ⬜ has a phase in
 [PARITY.md](PARITY.md). Nothing here is asserted from memory.
 
-## 1. What RRF has that NEITHER engine has
+## 1. What RRO has that NEITHER engine has
 
-| Capability | The vector engine | The multi-model DB | **RRF** |
+| Capability | The vector engine | The multi-model DB | **RRO** |
 |---|---|---|---|
 | **RRD — reason-ready object JIT**: shape lattice (modes→slivers), per-shape compiled plans, RROs | — | — | ✅ tested |
 | **Gate ladder at first touch**: stamp → L0 (µs) → L1 lexical (secrets/injection/unicode) → L2 semantic — *before any model cost* | — | — | ✅ tested; blocked docs never reach the embedder |
@@ -34,7 +34,7 @@ test or a measured run in this tree; every ⬜ has a phase in
 
 ## 2. Their home turf — measured on identical inputs (this container)
 
-| Metric | RRF | Popular RAG baseline (same corpus, same vectors) |
+| Metric | RRO | Popular RAG baseline (same corpus, same vectors) |
 |---|---|---|
 | Durable ingest (incl. embedding, RRD, provenance) | **10,800–10,953 docs/sec** | 566–586 docs/sec (no embedding work) |
 | Query p50 @100k, full pipeline (hybrid+rerank+readiness) | **1.88 ms** | 3.2–4.9 ms (vector-only) |

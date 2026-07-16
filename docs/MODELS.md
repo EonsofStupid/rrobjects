@@ -1,7 +1,7 @@
 # MODELS.md — the real embedder/reranker: architecture + exact build plan
 
 _The definitive spec for wiring **real** models (Qwen embedder, Nemotron-class
-reranker) into RRF. Written so a session on the target box executes it verbatim.
+reranker) into RRO. Written so a session on the target box executes it verbatim.
 This is the thing that was asked for first and is not yet done: every accuracy
 number in the repo today was produced by the deterministic (synthetic) embedder
 and is UNVERIFIED for real retrieval until this lands._
@@ -97,7 +97,7 @@ Target: `Qwen/Qwen3-Embedding-0.6B` (1024-dim; safetensors + tokenizer.json).
 - **Sanity:** cosine("king","queen") > cosine("king","banana"); paraphrases
   score high, unrelated low. Assert in an ignored-by-default test that runs with
   `--features candle` and weights present.
-- **Re-run the bake-off** (`rro-bench`) with the real embedder on both RRF and
+- **Re-run the bake-off** (`rro-bench`) with the real embedder on both RRO and
   the baseline, identical corpus. Record HONEST numbers in BENCHMARKS.md — they
   may differ hugely from the synthetic 1.000. **This is the first real answer to
   "is the engine worth it."**

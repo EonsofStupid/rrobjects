@@ -1,7 +1,7 @@
 # Reason Ready — The Master Plan
 
 **One engine. Recall (vector memory) · Connectome (relations & the visible
-map) · Reason Ready Flow (the readiness-gated pipeline). Clean-authored,
+map) · Reason Ready Objects (the readiness-gated pipeline). Clean-authored,
 zero external lineage, every claim measured.**
 
 This is the governing document. Reference systems were studied as *capability
@@ -84,7 +84,7 @@ Legend: ✅ done · 🔨 phase assigned · ⏸ deliberately later · ❓ needs y
 | ML model storage (surrealml-class) | DevPULSE model registry in estate (`models` CF + weights refs) | P7 🔨 |
 | Files/buckets | connector-fed blobs in estate | ⏸ P8 |
 
-### Reason Ready Flow (yours alone — no reference has this)
+### Reason Ready Objects (yours alone — no reference has this)
 
 | Capability | rrf representation | Phase |
 |---|---|---|

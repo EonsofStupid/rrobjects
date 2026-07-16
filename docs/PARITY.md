@@ -15,7 +15,7 @@
 statement, function namespace, index type, storage backend, capability —
 extracted from their actual source trees on 2026-07-15, deduplicated, and
 mapped to its rrf home.** This is the definitive build list: the union of
-both engines, plus the RRF-only layer (RRD, readiness, connectome, warp
+both engines, plus the RRO-only layer (RRD, readiness, connectome, warp
 mesh, DevPULSE), is what "done" means. Legend: ✅ built · 🔨 phase-assigned ·
 ⬜ inventoried, not yet scheduled.
 
@@ -159,7 +159,7 @@ operate`
 
 ---
 
-## C. RRF-only (neither reference has these — the moat)
+## C. RRO-only (neither reference has these — the moat)
 | Capability | rrf home | Status |
 |---|---|---|
 | **RRD — reason-ready object JIT** (modes→slivers lattice, per-shape plans, RROs) | `rrd` crate | 🔨 **in progress now** |

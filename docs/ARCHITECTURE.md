@@ -3,7 +3,7 @@
 > Recall finds. Reranker orders. Classifier judges readiness. Embedder
 > perceives. Connectome shows. One faithful engine, one flow.
 
-Reason Ready (RRF) is an embedded, tokio-native retrieval-and-reasoning engine.
+Reason Ready Objects (RRO) is an embedded, tokio-native retrieval-and-reasoning engine.
 It is clean-authored, single-binary, and stands on its own — no external
 database, vector store, or model gateway is required to run it. Model inference
 is a *pluggable boundary*, never a hard dependency.
