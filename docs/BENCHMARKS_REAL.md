@@ -107,6 +107,38 @@ The equality is also a useful consistency check: it proves `ask()` and the
 hand-built ladder agree, i.e. the engine's own composition has no hidden
 divergence from the arms measured beside it.
 
+### Finding 5 — the ANN default holds on real vectors (1,200-doc caveat)
+
+`recall/src/ann.rs:533` gates recall@10 ≥ 0.95 against exact search, and had only
+ever run on synthetic uniform noise. Swept on **real 2560-d Qwen3 embeddings**
+(`crates/recall/tests/real_vector_ef.rs`, fed by `RRO_EVAL_EXPORT_VECTORS`):
+
+| ef | recall@10 | µs/query |
+|---:|---:|---:|
+| 4 | 0.9980 | 196.3 |
+| 8 | 0.9980 | 197.0 |
+| 16 | 0.9990 | 253.7 |
+| 32 | **1.0000** | 383.1 |
+| **64** (default) | **1.0000** | **585.5** |
+| 256 | 1.0000 | 1094.9 |
+
+**The default `ef_search=64` holds on real data** — that was the open question.
+`ef=32` reaches the same recall 35% faster, so there is visible headroom.
+
+**Read this as weak evidence, not a tuning.** 1,200 vectors is small for an ANN
+gate: the graph is nearly fully connected, search degenerates toward exhaustive,
+and recall is flattered for reasons unrelated to the beam. Passing at `ef=4` is a
+statement about the corpus, not the index. The test prints this caveat itself and
+it stands until ≥50k real vectors are swept.
+
+Three bugs in the harness were found on the way here, each by distrusting a
+green: the timer wrapped the brute-force oracle (so µs/query measured the oracle,
+not the beam, and sat flat at ~4.2ms); `search(q,k,ef)` **clamps**
+`ef.max(config.ef_search)` (ann.rs:316), so every ef below 64 silently searched
+at 64 — the tell was ef=4..64 taking an identical 584µs while ef≥100 responded;
+and the first conclusion therefore claimed "passes at ef=4" when it had passed at
+64 nine times. The beam is now swept on the CONFIG, not the argument.
+
 ### Finding 4 — ingest is ~1000x slower than advertised
 
 **10 docs/sec** (3,633 docs in 355 s), against the README's **10.9k docs/sec**.
@@ -121,10 +153,6 @@ already computed."
 
 - **BRIGHT** — the reasoning-intensive benchmark (published SOTA is only ~22.1
   nDCG@10). nfcorpus is a warm-up; BRIGHT is the real target.
-- **ANN `ef` re-tuning on real vectors.** The recall@10 ≥ 0.95 gate
-  (`recall/src/ann.rs:533`) was measured on synthetic vectors. The sweep now
-  exists (`crates/recall/tests/real_vector_ef.rs`, fed by
-  `RRO_EVAL_EXPORT_VECTORS`) but has not been run to a recorded result.
 - **The 0.6/4/8B tier ladder** across candle · llama.cpp · vLLM.
 - **Statistical significance.** 323 queries, single run, no CIs. The −5.4% and
   +9.9% deltas are directional, not established.

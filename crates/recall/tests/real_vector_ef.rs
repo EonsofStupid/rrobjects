@@ -91,38 +91,70 @@ fn recall_at_10_on_real_vectors_across_ef() {
     let dim = corpus[0].1.dim();
     println!("corpus: {} real vectors, dim={dim}", corpus.len());
 
-    // Build once at the default ef_construction; sweep ef_search at query time.
+    // `AnnIndex::search(q, k, ef)` CLAMPS: `ef.max(config.ef_search).max(k)`
+    // (ann.rs:316 — documented as "callers may pass larger"). So passing ef=4 to
+    // an index built with ef_search=64 silently searches at 64. The first version
+    // of this sweep did exactly that and concluded "passes at ef=4"; the tell was
+    // that ef=4..64 all took an identical 584us while ef>=100 responded normally.
+    // To sweep the real beam, ef_search must be varied on the CONFIG.
+    let build = |ef_search: usize| {
+        let mut idx = AnnIndex::new(AnnConfig {
+            ef_search,
+            ..AnnConfig::default()
+        });
+        for (id, v) in &corpus {
+            idx.insert(Id::from(id.clone()), v);
+        }
+        idx
+    };
     let t = std::time::Instant::now();
-    let mut idx = AnnIndex::new(AnnConfig::default());
-    for (id, v) in &corpus {
-        idx.insert(Id::from(id.clone()), v);
-    }
-    println!("built in {:.1}s ({} nodes)", t.elapsed().as_secs_f64(), idx.len());
+    let probe_idx = build(AnnConfig::default().ef_search);
+    println!(
+        "built in {:.1}s ({} nodes)",
+        t.elapsed().as_secs_f64(),
+        probe_idx.len()
+    );
 
     // Queries: real vectors held out of nothing — a doc is its own best probe,
     // and the interesting question is whether the graph finds its true
     // neighbours, so probing WITH corpus vectors is the honest hard case.
     let probes: Vec<&(String, Embedding)> = corpus.iter().step_by(corpus.len() / 100).take(100).collect();
 
+    // Compute the oracle ONCE, outside the timed region. The first version of
+    // this timed exact_top_k inside the ef loop, so `us/query` was ~4.2ms and
+    // barely moved with ef — because it was measuring the brute-force oracle
+    // (1200 x 2560-d dot products), not the beam. A latency column that does not
+    // respond to the parameter being swept is measuring the wrong thing.
+    let truths: Vec<Vec<String>> = probes.iter().map(|(_, q)| exact_top_k(&corpus, q, 10)).collect();
+
     println!("\n{:>6}  {:>10}  {:>12}", "ef", "recall@10", "us/query");
     let mut best_passing: Option<usize> = None;
-    for ef in [16usize, 32, 64, 100, 128, 200, 256] {
+    for ef in [4usize, 8, 16, 32, 64, 100, 128, 200, 256] {
+        // A fresh index whose CONFIG beam is `ef`, so the clamp cannot mask it.
+        let idx = build(ef);
         let mut found = 0usize;
         let mut total = 0usize;
         let t = std::time::Instant::now();
-        for (_, q) in probes.iter() {
-            let truth = exact_top_k(&corpus, q, 10);
-            let got = idx.search(q, 10, ef);
-            let got_ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
-            for t in &truth {
+        let results: Vec<Vec<String>> = probes
+            .iter()
+            .map(|(_, q)| {
+                idx.search(q, 10, ef)
+                    .into_iter()
+                    .map(|(id, _)| id.as_str().to_string())
+                    .collect()
+            })
+            .collect();
+        let us = t.elapsed().as_micros() as f64 / probes.len() as f64;
+
+        for (truth, got) in truths.iter().zip(&results) {
+            for t in truth {
                 total += 1;
-                if got_ids.contains(&t.as_str()) {
+                if got.contains(t) {
                     found += 1;
                 }
             }
         }
         let recall = found as f64 / total as f64;
-        let us = t.elapsed().as_micros() as f64 / probes.len() as f64;
         let mark = if recall >= 0.95 { " <- passes the 0.95 gate" } else { "" };
         println!("{ef:>6}  {recall:>10.4}  {us:>12.1}{mark}");
         if recall >= 0.95 && best_passing.is_none() {
@@ -131,11 +163,27 @@ fn recall_at_10_on_real_vectors_across_ef() {
     }
 
     match best_passing {
-        Some(ef) => println!(
-            "\nRESULT: recall@10 >= 0.95 on REAL {dim}-d vectors at ef={ef} \
-             (default ef_search is {}).",
-            AnnConfig::default().ef_search
-        ),
+        Some(ef) => {
+            println!(
+                "\nRESULT: recall@10 >= 0.95 on REAL {dim}-d vectors at ef={ef} \
+                 (default ef_search is {}).",
+                AnnConfig::default().ef_search
+            );
+            // Do not let a small corpus be read as a scale result. An HNSW graph
+            // over a few thousand nodes is nearly fully connected, so the search
+            // degenerates toward exhaustive and recall is high for reasons that
+            // have nothing to do with the beam. The number below is real, and it
+            // is weak evidence until the corpus is large.
+            if corpus.len() < 50_000 {
+                println!(
+                    "CAVEAT: {} vectors is SMALL for an ANN gate. At this size the graph is\n\
+                     nearly fully connected and near-exhaustive search flatters recall — if it\n\
+                     passes at ef=4 that is a statement about the corpus, not the index. Re-run\n\
+                     at >=50k real vectors before treating any ef as tuned.",
+                    corpus.len()
+                );
+            }
+        }
         None => panic!(
             "recall@10 never reached 0.95 on real {dim}-d vectors at any ef up to 256. \
              The gate at ann.rs:533 holds only for synthetic vectors — that is a real \
