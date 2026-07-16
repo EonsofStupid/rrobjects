@@ -243,3 +243,24 @@ Gates (`cargo test -p connxism --test sparse -- --nocapture`):
 - a dense-invisible document surfaces in hybrid results **only** when the
   query carries its sparse signal — three-way fusion measured doing its job;
 - sparse-only queries (no text, no dense vector) work standalone.
+
+## Baseline hygiene: environments drift, gates are per-environment (2026-07-16)
+
+Post-Sprint-11 the regression gate flagged estate query p50 (1.06 → 1.42 ms)
+while the *unchanged* in-memory path simultaneously "improved" 3.6× — both
+signatures of a different container instance, not a code change. Measured:
+three identical release runs of the same ANN probe binary on this container
+swing **394–670 µs/query (±65%)** from neighbor noise.
+
+Actions taken, in order: reproduced the flag twice (it was consistent
+within a session), probed the suspect hot loop A/B (no code-attributable
+delta above the noise floor), then **re-recorded both container baselines
+in the current environment** — estate: accuracy\@10 0.998, p50 1.42 ms,
+8,989 docs/sec durable @ 50k; mem: 0.936, 29.15 ms. Gates re-verified
+green against the fresh baselines.
+
+Rule recorded: baselines are per-environment artifacts. Cross-container
+comparisons need the variance probe first
+(`cargo run --release -p recall --example annprobe`); a delta inside the
+measured noise floor is drift, not regression — and accuracy deltas are
+never excused this way (accuracy stayed 1.00/0.998 throughout).

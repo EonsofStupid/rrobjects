@@ -68,6 +68,7 @@ impl Store {
     }
 
     /// Dot of `node`'s stored vector with a full-precision query.
+    #[inline(always)]
     fn dot_query(&self, node: u32, dim: usize, q: &[f32], qsum: f32) -> f32 {
         let start = node as usize * dim;
         match self {
@@ -203,6 +204,7 @@ impl AnnIndex {
         self.store.bytes()
     }
 
+    #[inline(always)]
     fn dist_to(&self, node: u32, query: &[f32], qsum: f32) -> f32 {
         1.0 - self
             .store

@@ -8,9 +8,9 @@
     "top_k": 10,
     "protocol": "planted-v1"
   },
-  "recorded_at_ms": 1784149898890,
-  "ingest_docs_per_sec": 85357.83496913483,
-  "query_p50_ms": 98.149,
-  "query_p95_ms": 107.137,
+  "recorded_at_ms": 1784168954860,
+  "ingest_docs_per_sec": 112192.74744224863,
+  "query_p50_ms": 29.151,
+  "query_p95_ms": 30.111,
   "accuracy_at_k": 0.936
 }
