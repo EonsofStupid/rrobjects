@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod events;
+pub mod geo;
 pub mod query;
 pub mod simd;
 pub mod text;

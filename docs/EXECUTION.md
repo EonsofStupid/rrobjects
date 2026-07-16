@@ -152,6 +152,16 @@ paths); geo/datetime/uuid/full-text payload index types; nested filters.
 | 6 | `query_batch` + Euclid/Manhattan metrics on `Embedding` | ✅ batch ≡ sequential (asserted) | ✅ |
 | 7 | Green close + docs + push | fmt/clippy/test: 0 warnings, 41 suites green | ✅ |
 
+## Sprint 21 — Geo: haversine conditions + Z-order index keys
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | `rrf-core::geo`: `{lat, lon}` extraction from metadata, haversine (mean-radius great-circle, meters), `Condition::GeoRadius`/`GeoBox` with exact post-filter `matches` | haversine unit gates on known city pairs; condition matches on hand-checked points | ✅ |
+| 2 | `PIDX_GEO` typed keys: 26-bit/axis quantization, Z-order (Morton) interleave authored from the concept — monotone per axis, so one `[z(min corner), z(max corner)]` scan covers any box (false positives culled by an exact doc-level post-check) | Morton monotonicity property test; index-resolved id-sets EQUAL brute-force truth | ✅ |
+| 3 | Index-first geo filters: radius → bounding box → Z-range scan → exact haversine/box check against stored metadata; wired into `ids_for_condition` (query plane + counts get it free) | seeded city grid: box + radius id-sets equal brute force; query plane returns exactly the truth set; overwrite retracts | ✅ |
+| 4 | Honest limits documented: no antimeridian wrap in v1 (boxes must not cross ±180°), poles clamp | stated in code + PARITY | ✅ |
+| 5 | Green close: fmt/clippy/test, PARITY geo rows, BENCHMARKS note, push | full workspace green | ✅ |
+
 ## Sprint 20 — Ops surface: health verb, /metrics + /healthz HTTP, issues
 
 | # | Step | Verification gate | Status |

@@ -205,6 +205,9 @@ pub const PIDX_OTHER: u8 = b'o';
 pub const PIDX_DT: u8 = b'd';
 /// Type tag: UUID string (16 raw bytes follow — 2.25× smaller keys).
 pub const PIDX_UUID: u8 = b'u';
+/// Type tag: geo point (Morton/Z-order u64 BE follows — one range scan
+/// covers any lat/lon box, exact-checked at the doc level).
+pub const PIDX_GEO: u8 = b'g';
 
 /// Order-preserving byte encoding of an `i64` (sign bit flipped —
 /// lexicographic byte order equals numeric order).
@@ -269,6 +272,13 @@ pub fn encode_pidx_value(value: &serde_json::Value) -> Vec<u8> {
         }
         serde_json::Value::Bool(b) => vec![PIDX_BOOL, u8::from(*b)],
         other => {
+            // Geo points get Z-order keys; everything else canonical JSON.
+            if let Some((lat, lon)) = rrf_core::geo::point_of(other) {
+                let mut out = Vec::with_capacity(9);
+                out.push(PIDX_GEO);
+                out.extend_from_slice(&rrf_core::geo::morton(lat, lon).to_be_bytes());
+                return out;
+            }
             let text = other.to_string();
             let mut out = Vec::with_capacity(1 + text.len());
             out.push(PIDX_OTHER);
@@ -317,6 +327,13 @@ pub fn pidx_num_prefix(field: &str) -> Vec<u8> {
 pub fn pidx_dt_prefix(field: &str) -> Vec<u8> {
     let mut k = prefix(field);
     k.push(PIDX_DT);
+    k
+}
+
+/// Prefix under which all *geo* rows of `field` sort in Z-order.
+pub fn pidx_geo_prefix(field: &str) -> Vec<u8> {
+    let mut k = prefix(field);
+    k.push(PIDX_GEO);
     k
 }
 

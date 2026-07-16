@@ -99,6 +99,23 @@ fn ids_for_condition(db: &Db, c: &Condition) -> Result<HashSet<String>> {
                 |o: &Option<String>| o.as_deref().and_then(rrf_core::time::rfc3339_to_epoch_ms);
             scan_dt_range(db, key, ms(gt), ms(gte), ms(lt), ms(lte))
         }
+        Condition::GeoRadius {
+            key,
+            lat,
+            lon,
+            radius_m,
+        } => {
+            let ((lat_min, lon_min), (lat_max, lon_max)) =
+                rrf_core::geo::radius_bbox(*lat, *lon, *radius_m);
+            scan_geo(db, key, lat_min, lon_min, lat_max, lon_max, c)
+        }
+        Condition::GeoBox {
+            key,
+            lat_min,
+            lon_min,
+            lat_max,
+            lon_max,
+        } => scan_geo(db, key, *lat_min, *lon_min, *lat_max, *lon_max, c),
         Condition::Exists { key } => scan_field(db, key),
     }
 }
@@ -214,6 +231,64 @@ fn scan_dt_range(
             continue;
         }
         out.insert(String::from_utf8_lossy(&k[val_start + 9..]).into_owned());
+    }
+    Ok(out)
+}
+
+/// Geo scan: one Z-order range `[morton(min corner), morton(max corner)]`
+/// covers every point of the box (Morton codes are monotone per axis);
+/// Z-jumps outside the box are false positives, culled by re-checking the
+/// condition EXACTLY against each candidate's stored metadata — so radius
+/// results are true haversine, never quantized.
+#[allow(clippy::too_many_arguments)]
+fn scan_geo(
+    db: &Db,
+    field: &str,
+    lat_min: f64,
+    lon_min: f64,
+    lat_max: f64,
+    lon_max: f64,
+    exact: &Condition,
+) -> Result<HashSet<String>> {
+    let handle = db.cf(CF_PIDX)?;
+    let geo_prefix = keys::pidx_geo_prefix(field);
+    let z_lo = rrf_core::geo::morton(lat_min, lon_min);
+    let z_hi = rrf_core::geo::morton(lat_max, lon_max);
+    let mut start = geo_prefix.clone();
+    start.extend_from_slice(&z_lo.to_be_bytes());
+
+    let docs_cf = db.cf(crate::keys::CF_DOCS)?;
+    let mut out = HashSet::new();
+    for item in db.0.iterator_cf(
+        handle,
+        rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward),
+    ) {
+        let (k, _) = item.map_err(rocks_err)?;
+        if !k.starts_with(&geo_prefix) {
+            break;
+        }
+        let val_start = geo_prefix.len();
+        let Some(bytes) = k.get(val_start..val_start + 8) else {
+            continue;
+        };
+        let z = u64::from_be_bytes(bytes.try_into().expect("8-byte slice"));
+        if z > z_hi {
+            break; // sorted by code; past the max corner means done
+        }
+        let Some(&sep) = k.get(val_start + 8) else {
+            continue;
+        };
+        if sep != SEP {
+            continue;
+        }
+        let doc_id = String::from_utf8_lossy(&k[val_start + 9..]).into_owned();
+        // Exact check from the durable document.
+        if let Some(bytes) = db.0.get_cf(docs_cf, doc_id.as_bytes()).map_err(rocks_err)? {
+            let doc: crate::model::StoredDoc = serde_json::from_slice(&bytes)?;
+            if exact.matches(&doc.metadata) {
+                out.insert(doc_id);
+            }
+        }
     }
     Ok(out)
 }

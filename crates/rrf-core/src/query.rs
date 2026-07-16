@@ -63,6 +63,32 @@ pub enum Condition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lte: Option<String>,
     },
+    /// The field is a `{lat, lon}` point within `radius_m` meters of the
+    /// center (true haversine).
+    GeoRadius {
+        /// Metadata field name.
+        key: String,
+        /// Center latitude (degrees).
+        lat: f64,
+        /// Center longitude (degrees).
+        lon: f64,
+        /// Radius in meters.
+        radius_m: f64,
+    },
+    /// The field is a `{lat, lon}` point inside the box. The box must not
+    /// cross the antimeridian (v1 limit).
+    GeoBox {
+        /// Metadata field name.
+        key: String,
+        /// Southern edge (min latitude, degrees).
+        lat_min: f64,
+        /// Western edge (min longitude, degrees).
+        lon_min: f64,
+        /// Northern edge (max latitude, degrees).
+        lat_max: f64,
+        /// Eastern edge (max longitude, degrees).
+        lon_max: f64,
+    },
     /// The field is present (any value).
     Exists {
         /// Metadata field name.
@@ -114,6 +140,33 @@ impl Condition {
         }
     }
 
+    /// Radius condition: within `radius_m` meters of `(lat, lon)`.
+    pub fn geo_radius(key: impl Into<String>, lat: f64, lon: f64, radius_m: f64) -> Self {
+        Condition::GeoRadius {
+            key: key.into(),
+            lat,
+            lon,
+            radius_m,
+        }
+    }
+
+    /// Box condition: inside `[lat_min..lat_max] × [lon_min..lon_max]`.
+    pub fn geo_box(
+        key: impl Into<String>,
+        lat_min: f64,
+        lon_min: f64,
+        lat_max: f64,
+        lon_max: f64,
+    ) -> Self {
+        Condition::GeoBox {
+            key: key.into(),
+            lat_min,
+            lon_min,
+            lat_max,
+            lon_max,
+        }
+    }
+
     /// Existence condition.
     pub fn exists(key: impl Into<String>) -> Self {
         Condition::Exists { key: key.into() }
@@ -126,6 +179,8 @@ impl Condition {
             | Condition::Any { key, .. }
             | Condition::Range { key, .. }
             | Condition::DateRange { key, .. }
+            | Condition::GeoRadius { key, .. }
+            | Condition::GeoBox { key, .. }
             | Condition::Exists { key } => key,
         }
     }
@@ -175,6 +230,27 @@ impl Condition {
                     None => false,
                 }
             }
+            Condition::GeoRadius {
+                key,
+                lat,
+                lon,
+                radius_m,
+            } => match metadata.get(key).and_then(crate::geo::point_of) {
+                Some((plat, plon)) => crate::geo::haversine_m(*lat, *lon, plat, plon) <= *radius_m,
+                None => false,
+            },
+            Condition::GeoBox {
+                key,
+                lat_min,
+                lon_min,
+                lat_max,
+                lon_max,
+            } => match metadata.get(key).and_then(crate::geo::point_of) {
+                Some((plat, plon)) => {
+                    plat >= *lat_min && plat <= *lat_max && plon >= *lon_min && plon <= *lon_max
+                }
+                None => false,
+            },
             Condition::Exists { key } => metadata.contains_key(key),
         }
     }

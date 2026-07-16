@@ -422,3 +422,24 @@ database.
 Gates: health verb equals live counters over TCP; raw-socket HTTP GETs
 parse (every metrics line numeric, probes 200, 404/405 policed); issues
 fires on a planted backlog and is clean after quiesce.
+
+## Sprint 21: geo — the last core index type (2026-07-16)
+
+`{lat, lon}` metadata points are now first-class: `rrf-core::geo`
+(haversine great-circle in meters, unit-gated on Paris↔London;
+`Condition::GeoRadius`/`GeoBox` with exact post-filter matches) and
+`PIDX_GEO` typed keys — a Z-order/Morton encoding (26 bits/axis, ~0.3 m
+quantization) authored from the concept, zero-dep. The scan exploits
+Morton's per-axis monotonicity (property-gated, 500 random pairs): one
+`[z(min corner), z(max corner)]` range covers every point of a box;
+Z-jump false positives are culled by re-checking each candidate EXACTLY
+against stored metadata, so radius results are true haversine, never
+quantized. Radius queries pre-filter through a latitude-scaled bounding
+box. Honest v1 limits: boxes must not cross the antimeridian; polygons
+deferred.
+
+Gates: index-resolved id-sets equal brute-force truth on a 15×15 city
+grid across 4 boxes (incl. whole-grid, tiny, disjoint) and 4 radii
+(incl. corner-centered and 10 m); the query plane returns exactly the
+truth set; a moved point retracts from its old radius and is findable
+at its new home.

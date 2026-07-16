@@ -60,9 +60,9 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Sparse vectors + sparse index (inverted, on-disk variants) | `SparseVector` contract + weighted postings CF (one row per (dim, doc), exact accumulated dot, RRF-fused with dense+lexical) | ✅ |
 | Multi-vector per point (named vectors, late-interaction/ColBERT-style) | named spaces (`nvecs` CF, per-name dims, exact cosine) + token vectors (`mvecs` CF) with MaxSim rescore in the query plane (`using` / `multi`, over the wire) | ✅ exact; per-space ANN 🔨 |
 | Payload field indexes ×8: keyword, integer, float, bool, geo, text (full-text), datetime, uuid | `pidx` CF, order-preserving typed keys (keyword/int/float/bool/**datetime** (RFC3339→epoch keys, chronological range scans)/**uuid** (16-byte keys) ✅, 9.8× vs scan measured) | ✅ core; geo/full-text 🔨 |
-| Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | `Filter` (must/should/must_not × eq/any/range/**date_range**/exists), filter-first via `pidx` or post-filter | ✅; geo/nested 🔨 |
+| Filtering DSL (must/should/must_not, match/range/geo/nested, filtered KNN) | `Filter` (must/should/must_not × eq/any/range/date_range/**geo_radius**/**geo_box**/exists), filter-first via `pidx` or post-filter | ✅; nested 🔨 |
 | Text index w/ tokenizers (word/whitespace/prefix/multilingual, stemmer, stopwords) | `Analyzer` pipeline (word/whitespace/prefix-edge-gram × lowercase × stopwords × Porter stemmer, authored from the published algorithm), persisted per estate — postings and queries always agree | ✅ core; multilingual ⬜ |
-| Geo index (radius/box/polygon) | estate geo CF | ⬜ P3 |
+| Geo index (radius/box/polygon) | `PIDX_GEO` Z-order keys (Morton, 26 bits/axis, monotone-per-axis gated) — one range scan covers any box, exact haversine/box re-check at the doc level; no antimeridian wrap in v1 (documented); polygon ⬜ | ✅ radius/box |
 | WAL + flush/ack semantics | RocksDB WAL (✅ via estate) + explicit ack | ✅ base → 🔨 P5 semantics |
 | Segments + optimizer (merge, vacuum, indexing thresholds) | estate maintenance tasks | 🔨 P5 |
 | On-disk vs in-RAM storage toggles (vectors/payload/index) | estate storage profiles | ⬜ P5 |
