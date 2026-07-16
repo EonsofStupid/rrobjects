@@ -321,6 +321,17 @@ fn default_true() -> bool {
     true
 }
 
+/// One prefetch stage: gather `limit` candidates with an inner query;
+/// the outer query rescores inside the union of its prefetches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prefetch {
+    /// The inner retrieval (may itself carry prefetches — depth-capped
+    /// by executors).
+    pub query: EstateQuery,
+    /// How many candidates this stage contributes.
+    pub limit: usize,
+}
+
 /// A typed retrieval request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EstateQuery {
@@ -368,6 +379,10 @@ pub struct EstateQuery {
     /// Carry each winner's stored dense vector on the candidate.
     #[serde(default)]
     pub with_vectors: bool,
+    /// Prefetch pipeline: each stage gathers candidates by its own signal;
+    /// the outer query rescores exactly inside their union.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefetch: Vec<Prefetch>,
 }
 
 impl Default for EstateQuery {
@@ -387,6 +402,7 @@ impl Default for EstateQuery {
             with_payload: true,
             offset: 0,
             with_vectors: false,
+            prefetch: Vec::new(),
         }
     }
 }
@@ -475,6 +491,13 @@ impl EstateQuery {
     /// Carry each winner's stored dense vector on the candidate.
     pub fn with_vectors(mut self) -> Self {
         self.with_vectors = true;
+        self
+    }
+
+    /// Add a prefetch stage (gather `limit` candidates with `query`; the
+    /// outer query rescores inside the union of all prefetches).
+    pub fn prefetch(mut self, query: EstateQuery, limit: usize) -> Self {
+        self.prefetch.push(Prefetch { query, limit });
         self
     }
 

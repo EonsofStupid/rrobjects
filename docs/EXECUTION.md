@@ -152,6 +152,14 @@ paths); geo/datetime/uuid/full-text payload index types; nested filters.
 | 6 | `query_batch` + Euclid/Manhattan metrics on `Embedding` | ✅ batch ≡ sequential (asserted) | ✅ |
 | 7 | Green close + docs + push | fmt/clippy/test: 0 warnings, 41 suites green | ✅ |
 
+## Sprint 24 — Prefetch pipelines + index-first facets
+
+| # | Step | Verification gate | Status |
+|---|---|---|---|
+| 1 | `Prefetch { query, limit }` on `EstateQuery` (recursive, serde-default — rides the wire): each prefetch gathers candidates by its own signal; their union becomes the outer query's id universe (∩ explicit scope), rescored exactly by the outer signal (dense / sparse / MaxSim). Depth-capped | two-stage dense→MaxSim pipeline equals the hand-built equivalent; sparse→dense; union of two prefetches; depth cap errors; old payloads parse | ✅ |
+| 2 | Index-first `facet`: run-length over the sorted `pidx` rows for STR/NUM/BOOL-tagged fields (rows sort by typed value — counting distinct values is one prefix scan, no doc reads); DT/UUID/GEO/OTHER tags fall back to the exact doc scan honestly; `Estate::distinct(field)` on top | indexed facet equals the full-scan facet on the same estate (before/after indexing); mixed-tag fields fall back | ✅ |
+| 3 | Green close: fmt/clippy/test, PARITY rows (prefetch ✅, facet index-first), BENCHMARKS note, push | full workspace green | ✅ |
+
 ## Sprint 23 — Lexical top-k: max-score pruning + postings fast path
 
 | # | Step | Verification gate | Status |

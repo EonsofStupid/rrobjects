@@ -506,3 +506,22 @@ so exactness forces the full postings walk; that cost is iterator-bound
 (~150k RocksDB steps), not parse-bound. If it ever matters, the next
 lever is bounded-error term dropping (idf < ε) — approximate, so it
 would be opt-in and labeled.
+
+## Sprint 24: prefetch pipelines + index-first facets (2026-07-16)
+
+`Prefetch { query, limit }` joins the query contract (recursive,
+serde-default — rides the a2a wire and MCP unchanged): each stage gathers
+candidates by its own signal, the union becomes the outer query's id
+universe (∩ explicit scope), and the outer signal rescores exactly —
+dense, sparse, or MaxSim. Depth-capped at three levels (a pipeline, not a
+recursion bomb; gated both ways). Gated: a dense→MaxSim pipeline equals
+its hand-built two-stage equivalent; a sparse+dense union carries
+dense-invisible docs in; old wire payloads parse.
+
+`Estate::facet` is index-first for string/bool fields: rows sort by typed
+value, so counting distinct values is one run-length prefix scan with
+zero doc reads (gated equal to the doc scan on the same estate).
+Honest limit found by the gate: numeric keys hold a canonical f64
+encoding, not the JSON source spelling ("2.0" vs "2") — reconstructing
+would silently change facet keys, so numbers (and datetime/uuid/geo)
+fall back to the exact doc scan. `Estate::distinct` lists facet keys.

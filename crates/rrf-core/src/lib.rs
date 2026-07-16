@@ -19,7 +19,7 @@ pub mod traits;
 pub mod types;
 
 pub use error::{Result, RrfError};
-pub use query::{Condition, EstateQuery, Filter};
+pub use query::{Condition, EstateQuery, Filter, Prefetch};
 pub use traits::{Classifier, Embedder, Recall, Reranker, VectorRecord};
 pub use types::{
     maxsim, Candidate, Chunk, Document, Embedding, Id, Metadata, Query, Readiness, RecallResult,

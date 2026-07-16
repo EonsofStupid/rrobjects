@@ -25,11 +25,65 @@ const INDEXED_SCOPE_MAX: usize = 4096;
 const FUSION_RRF_K: f32 = 60.0;
 
 impl ConnXRecall {
-    /// Execute a typed query. Strategy, in order: explicit scope wins;
-    /// otherwise a fully-indexed filter resolves its exact id-set first and
-    /// scores inside it; otherwise hybrid (ANN + BM25, fused) with
-    /// over-fetch + post-filter.
+    /// Execute a typed query. Strategy, in order: prefetch stages (if any)
+    /// gather the id universe; an explicit scope wins/intersects; otherwise
+    /// a fully-indexed filter resolves its exact id-set first and scores
+    /// inside it; otherwise hybrid (ANN + BM25, fused) with over-fetch +
+    /// post-filter.
     pub async fn query(&self, q: EstateQuery) -> Result<Vec<Candidate>> {
+        self.query_depth(q, 0).await
+    }
+
+    /// Prefetch stages may nest; three levels is a pipeline, more is a bug.
+    const MAX_PREFETCH_DEPTH: usize = 3;
+
+    fn query_depth(
+        &self,
+        mut q: EstateQuery,
+        depth: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candidate>>> + Send + '_>>
+    {
+        Box::pin(async move {
+            // Prefetch: run each stage (recursively), union their ids, and
+            // fold the union into the scope the outer query executes in.
+            if !q.prefetch.is_empty() {
+                if depth >= Self::MAX_PREFETCH_DEPTH {
+                    return Err(rrf_core::RrfError::Recall(format!(
+                        "prefetch nesting exceeds {} levels",
+                        Self::MAX_PREFETCH_DEPTH
+                    )));
+                }
+                let stages = std::mem::take(&mut q.prefetch);
+                let mut union: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for stage in stages {
+                    let mut inner = stage.query;
+                    inner.top_k = stage.limit;
+                    inner.with_payload = false;
+                    for c in self.query_depth(inner, depth + 1).await? {
+                        if seen.insert(c.id.as_str().to_string()) {
+                            union.push(c.id.as_str().to_string());
+                        }
+                    }
+                }
+                q.scope = Some(match q.scope.take() {
+                    None => union,
+                    Some(explicit) => {
+                        let allow: std::collections::HashSet<&str> =
+                            explicit.iter().map(String::as_str).collect();
+                        union
+                            .into_iter()
+                            .filter(|id| allow.contains(id.as_str()))
+                            .collect()
+                    }
+                });
+            }
+            self.query_flat(q).await
+        })
+    }
+
+    /// The non-recursive body (prefetch already folded into `scope`).
+    async fn query_flat(&self, q: EstateQuery) -> Result<Vec<Candidate>> {
         let top_k = q.top_k;
         if top_k == 0 {
             return Ok(Vec::new());
@@ -309,10 +363,22 @@ fn matches_filter(metadata: &Metadata, filter: &Metadata) -> bool {
 }
 
 impl Estate {
-    /// Facet: value → document count for a metadata field. v1 scans the doc
-    /// column family (secondary indexes take over in the P3 tail — this is
-    /// exact today, and honest about its cost).
+    /// Facet: value → document count for a metadata field. **Index-first**
+    /// when the field has a payload index and its rows carry decodable
+    /// tags (string / bool): the rows sort by typed value, so
+    /// counting distinct values is one run-length prefix scan with zero
+    /// doc reads. Numeric/datetime/uuid/geo/other tags (original JSON
+    /// spelling not reconstructible from the canonical key) and unindexed
+    /// fields fall back to the exact doc scan.
     pub fn facet(&self, field: &str) -> Result<std::collections::BTreeMap<String, u64>> {
+        if crate::filter::indexed_fields(&self.db)?
+            .iter()
+            .any(|f| f == field)
+        {
+            if let Some(counts) = self.facet_from_index(field)? {
+                return Ok(counts);
+            }
+        }
         let handle = self.db.cf(CF_DOCS)?;
         let mut out = std::collections::BTreeMap::new();
         for item in self.db.0.iterator_cf(handle, rocksdb::IteratorMode::Start) {
@@ -327,6 +393,54 @@ impl Estate {
             }
         }
         Ok(out)
+    }
+
+    /// One prefix scan over `field`'s index rows, counting per distinct
+    /// typed value. Returns `None` (fall back to the doc scan) on any tag
+    /// whose surface form the key can't reconstruct.
+    fn facet_from_index(
+        &self,
+        field: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, u64>>> {
+        let handle = self.db.cf(crate::keys::CF_PIDX)?;
+        let prefix = crate::keys::pidx_field_prefix(field);
+        let mut out = std::collections::BTreeMap::new();
+        for item in self.db.0.iterator_cf(
+            handle,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        ) {
+            let (k, _) = item.map_err(rocks_err)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            let rest = &k[prefix.len()..];
+            let Some((tag, payload)) = rest.split_first() else {
+                continue;
+            };
+            // payload = typed-value bytes + SEP + doc_id; the value part
+            // ends at the LAST separator (doc ids never contain NUL).
+            let Some(sep_pos) = payload.iter().rposition(|&b| b == crate::keys::SEP) else {
+                continue;
+            };
+            let value = &payload[..sep_pos];
+            let surface = match *tag {
+                crate::keys::PIDX_STR => String::from_utf8_lossy(value).into_owned(),
+                crate::keys::PIDX_BOOL => (value == [1]).to_string(),
+                // Numbers, datetimes, uuids, geo, other: the key holds a
+                // canonical encoding, not the JSON source spelling ("2.0"
+                // vs "2") — reconstructing would silently change facet
+                // keys, so these fall back to the exact doc scan.
+                _ => return Ok(None),
+            };
+            *out.entry(surface).or_insert(0) += 1;
+        }
+        Ok(Some(out))
+    }
+
+    /// The distinct values of a metadata field (facet keys) — index-first
+    /// where the facet is.
+    pub fn distinct(&self, field: &str) -> Result<Vec<String>> {
+        Ok(self.facet(field)?.into_keys().collect())
     }
 
     /// Count documents matching a metadata equality filter (empty filter =

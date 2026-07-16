@@ -40,13 +40,13 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Capability | rrf home | Status |
 |---|---|---|
 | Search / SearchBatch (dense KNN + filter + params) | ANN graph + pending overlay + filters | ✅ |
-| Universal Query / QueryBatch / prefetch pipelines | `EstateQuery` (typed contract in `rrf-core`, executed by the estate **and over the a2a wire / MCP**) + `query_batch` | ✅ core+batch; prefetch 🔨 |
+| Universal Query / QueryBatch / prefetch pipelines | `EstateQuery` (typed contract in `rrf-core`, executed by the estate **and over the a2a wire / MCP**) + `query_batch` + recursive `Prefetch` stages (union → exact outer rescore by any signal, depth-capped, gated vs hand-built) | ✅ |
 | Hybrid (dense + sparse/lexical fusion, RRF) | `hybrid_search` (BM25+dense, RRF-fused) | ✅ |
 | SearchGroups / QueryGroups (group by payload field) | `query_grouped` (n groups × m per group, best-first) | ✅ |
 | Recommend / RecommendBatch / RecommendGroups (pos/neg examples) | `recommend` (avg-positive − avg-negative steering, examples excluded; a2a verb + client) | ✅ core |
 | Discover / DiscoverBatch (context pairs steering) | `discover` (pair-agreement rerank over the fetched pool) | ✅ core |
 | Search matrix (pairs/offsets similarity matrix) | `similarity_matrix(ids)` — pairwise cosine over stored vectors, unknown ids skipped (gated vs direct cosine) | ✅ |
-| Facet (value counts over payload field) | `Estate::facet` (exact, v1 scan) | ✅ |
+| Facet (value counts over payload field) | `Estate::facet` — index-first run-length over sorted `pidx` rows for string/bool fields (zero doc reads, gated equal to the scan); canonical-key types fall back to the exact scan honestly; `distinct()` on top | ✅ |
 | Random sampling | `Estate::sample(n, seed)` — deterministic seeded reservoir over the doc CF (gated: reproducible, distinct, exact edge cases) | ✅ |
 | Score threshold / offset / with_payload / with_vectors selectors | `EstateQuery::threshold` + `ids_only` + `offset` (exact pagination on every strategy) + `with_vectors` (`Candidate.vector`) | ✅ |
 
