@@ -87,6 +87,11 @@ fi
 # (recall::ann::filter_aware_tests); these are the full-scale correctness gates.
 run filter_aware_hnsw cargo test -p connxism --release --test filter_aware_hnsw -- --ignored --nocapture
 
+# Indexed-filter-vs-scan timing gate at 10k docs. Correctness is asserted, timing
+# reported. ~25 s debug — past nextest's 60 s slow-kill on a 2-core CI runner, so
+# #[ignore]d and run in release here alongside the other scale gates.
+run filter_scan_10k cargo test -p connxism --release --test filters p9_gate_indexed_filter_vs_scan_at_10k -- --ignored --nocapture
+
 echo
 echo "gates: $pass passed, $skip skipped, $fail failed"
 [ "$fail" -eq 0 ]

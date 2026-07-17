@@ -169,6 +169,7 @@ async fn threshold_and_lean_payload() {
 /// Measured (printed, recorded in BENCHMARKS.md): indexed count vs full scan
 /// at 10k docs. Correctness is asserted; the timing is reported honestly.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "10k docs; ~25s debug, past nextest slow-kill on 2-core CI. Run via scripts/gates.sh"]
 async fn p9_gate_indexed_filter_vs_scan_at_10k() {
     let dir = tempfile::tempdir().unwrap();
     let estate = Estate::open(dir.path(), "p9").unwrap();
