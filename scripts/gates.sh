@@ -81,6 +81,12 @@ else
   skip=$((skip+1))
 fi
 
+# Filter-aware HNSW correctness at scale (200k–300k docs). No server or weights
+# needed — just too slow for CI's debug build (~90 s each), so #[ignore]d and run
+# in release here. The mechanism is also unit-tested fast in-CI
+# (recall::ann::filter_aware_tests); these are the full-scale correctness gates.
+run filter_aware_hnsw cargo test -p connxism --release --test filter_aware_hnsw -- --ignored --nocapture
+
 echo
 echo "gates: $pass passed, $skip skipped, $fail failed"
 [ "$fail" -eq 0 ]

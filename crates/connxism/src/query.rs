@@ -17,9 +17,18 @@ use crate::store::ConnXRecall;
 /// How hard filtered searches over-fetch before post-filtering.
 const FILTER_OVERFETCH: usize = 8;
 
-/// Above this many index-matched ids, exact scoring over the set costs more
-/// than over-fetch + post-filter; fall back.
-const INDEXED_SCOPE_MAX: usize = 4096;
+/// Match count up to which an indexed filter is scored **exactly** over its
+/// resolved id set.
+///
+/// Exact cosine over the matched set is one point-lookup + one dot per id —
+/// measured at ~2.7 ms for 5,000 ids — and it is correct at every selectivity.
+/// The old value was 4,096, which was not a cost limit but a *correctness cliff*:
+/// a filter matching 4,097 docs fell to a global post-filter that returned the
+/// query's global neighbours intersected with the filter, i.e. almost nothing
+/// for an uncorrelated filter. 65,536 keeps exact scoring in the sub-100 ms band
+/// while covering essentially every real filtered query; the rare larger matched
+/// set takes the filter-aware graph traversal, which is also correct.
+const EXACT_SCOPE_MAX: usize = 65_536;
 
 /// The standard reciprocal-rank-fusion constant (same as the hybrid path).
 const FUSION_RRF_K: f32 = 60.0;
@@ -150,7 +159,21 @@ impl ConnXRecall {
                     .await?
             }
             None if !dsl.is_empty() => match crate::filter::ids_where(&self.db, &dsl)? {
-                Some(ids) if ids.len() <= INDEXED_SCOPE_MAX => {
+                // Fully-indexed filter: `ids` is the EXACT matching set, and its
+                // length is the exact cardinality — no estimation needed.
+                //
+                // Score it exactly whenever that is affordable. Exact cosine over
+                // the set is a point-lookup per id (~0.5 µs warm) plus a dot
+                // product — measured at 2.7 ms for 5,000 ids — and it is correct
+                // at *every* selectivity. The old code capped this at 4,096 and
+                // fell to global post-filter above it, which is the bug this
+                // phase exists to kill: a filter matching 5,000 of 200,000 docs
+                // (2.5%) exceeded the cap, ran a global ANN fetching k×8=80
+                // candidates, and `retain` kept only the ~2 that happened to fall
+                // in the bucket — a top-10 request answered with 1 result,
+                // silently. Filtered ANN must return the filtered nearest
+                // neighbours, not the global ones that survive a filter.
+                Some(ids) if ids.len() <= EXACT_SCOPE_MAX => {
                     prefiltered = true;
                     allowed = Some(ids.iter().cloned().collect());
                     if ids.is_empty() {
@@ -159,7 +182,24 @@ impl ConnXRecall {
                         self.scoped_search(&text, &vector, want, ids).await?
                     }
                 }
-                _ => {
+                // A genuinely huge matched set (> EXACT_SCOPE_MAX). Exact scoring
+                // would be O(matches) and slow, but global post-filter would be
+                // *wrong* — so this is the filter-aware ANN path: walk the graph
+                // and keep only allowed nodes, so the beam spends its whole width
+                // inside the filter instead of on global neighbours that will be
+                // thrown away. Correct at any selectivity, sub-linear in the
+                // matched set.
+                Some(ids) => {
+                    prefiltered = true;
+                    let allow: std::collections::HashSet<String> = ids.into_iter().collect();
+                    allowed = Some(allow.clone());
+                    self.filter_aware_search(&text, &vector, want, &allow, q.fusion)
+                        .await?
+                }
+                // Filter not resolvable from indexes at all — the only option is
+                // over-fetch + post-filter, with the over-fetch scaled up so the
+                // page is likely to fill even for a selective predicate.
+                None => {
                     self.unscoped(&text, &vector, q.vector.is_some(), fetch, q.fusion)
                         .await?
                 }

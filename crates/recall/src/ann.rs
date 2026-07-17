@@ -323,6 +323,54 @@ impl AnnIndex {
             .collect()
     }
 
+    /// Nearest `k` among the nodes `allow` accepts — filter-aware traversal.
+    ///
+    /// `allow` is checked by external id, so the caller passes the set its filter
+    /// resolved to. `ef` is widened internally: a filter of selectivity `s` needs
+    /// the frontier to hold ~`ef/s` nodes to surface `ef` allowed ones, so the
+    /// beam runs at `ef_search / max(s, floor)` — bounded, because an
+    /// arbitrarily selective filter over an arbitrarily large graph is the case
+    /// exact scoping already took.
+    pub fn search_filtered(
+        &self,
+        query: &Embedding,
+        k: usize,
+        ef: usize,
+        allow: &std::collections::HashSet<Id>,
+    ) -> Vec<(Id, f32)> {
+        let Some((mut cur, top)) = self.entry else {
+            return Vec::new();
+        };
+        if k == 0 || self.dim != Some(query.dim()) || allow.is_empty() {
+            return Vec::new();
+        }
+        let q = query.normalized();
+        let q = q.as_slice();
+        let qsum: f32 = q.iter().sum();
+
+        for layer in (1..=top).rev() {
+            cur = self.greedy_at(q, qsum, cur, layer);
+        }
+
+        // Widen ef by the inverse selectivity so the frontier holds enough
+        // allowed nodes, capped so a 1-in-a-million filter does not ask for a
+        // graph-sized beam (that regime belongs to exact scoping).
+        let selectivity = (allow.len() as f64 / self.ids.len().max(1) as f64).max(1.0 / 4096.0);
+        let widened = ((ef.max(self.config.ef_search).max(k) as f64) / selectivity)
+            .ceil()
+            .min(self.ids.len() as f64) as usize;
+
+        let found = self.beam_admit(q, qsum, cur, 0, widened, false, |node| {
+            allow.contains(&self.ids[node as usize])
+        });
+
+        found
+            .into_iter()
+            .take(k)
+            .map(|s| (self.ids[s.node as usize].clone(), 1.0 - s.dist))
+            .collect()
+    }
+
     /// Greedy hill-climb at one layer: move to any closer neighbor until none.
     fn greedy_at(&self, query: &[f32], qsum: f32, start: u32, layer: usize) -> u32 {
         let mut cur = start;
@@ -357,6 +405,31 @@ impl AnnIndex {
         ef: usize,
         include_deleted: bool,
     ) -> Vec<Scored> {
+        self.beam_admit(query, qsum, start, layer, ef, include_deleted, |_| true)
+    }
+
+    /// Beam search that **traverses every node but admits only those `admit`
+    /// accepts** into the result set.
+    ///
+    /// This is what makes filtered ANN correct rather than approximate. A naive
+    /// filtered search runs a normal beam and drops non-matching results at the
+    /// end — but the beam only ever held the query's *global* neighbours, so if
+    /// the filter is uncorrelated with the query almost nothing survives. Here the
+    /// candidate frontier still walks through disallowed nodes (they are the graph
+    /// edges that connect one allowed region to another — dropping them would sever
+    /// the graph), while the result heap only ever holds allowed nodes. The beam
+    /// therefore spends its full width `ef` inside the filter.
+    #[allow(clippy::too_many_arguments)]
+    fn beam_admit(
+        &self,
+        query: &[f32],
+        qsum: f32,
+        start: u32,
+        layer: usize,
+        ef: usize,
+        include_deleted: bool,
+        admit: impl Fn(u32) -> bool,
+    ) -> Vec<Scored> {
         let mut visited = vec![false; self.ids.len()];
         visited[start as usize] = true;
 
@@ -369,7 +442,7 @@ impl AnnIndex {
         }));
         // Results: max-heap by distance (evict farthest).
         let mut results: BinaryHeap<Scored> = BinaryHeap::new();
-        if include_deleted || !self.deleted[start as usize] {
+        if (include_deleted || !self.deleted[start as usize]) && admit(start) {
             results.push(Scored {
                 dist: start_dist,
                 node: start,
@@ -391,7 +464,7 @@ impl AnnIndex {
                     let worst = results.peek().map(|s| s.dist).unwrap_or(f32::INFINITY);
                     if d < worst || results.len() < ef {
                         candidates.push(std::cmp::Reverse(Scored { dist: d, node: nb }));
-                        if include_deleted || !self.deleted[nb as usize] {
+                        if (include_deleted || !self.deleted[nb as usize]) && admit(nb) {
                             results.push(Scored { dist: d, node: nb });
                             if results.len() > ef {
                                 results.pop();
@@ -606,5 +679,83 @@ mod tests {
         assert!(idx.search(&Embedding(vec![1.0, 0.0]), 5, 32).is_empty());
         let (idx, _) = build(50, 8);
         assert!(idx.search(&Embedding(vec![1.0; 16]), 5, 32).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod filter_aware_tests {
+    use super::*;
+
+    /// The traversal primitive in isolation: with the filter uncorrelated to the
+    /// query, `search_filtered` must still return allowed nodes near the query —
+    /// where a plain `search` + post-filter would return almost nothing.
+    #[test]
+    fn search_filtered_finds_allowed_neighbours_a_postfilter_would_miss() {
+        let mut idx = AnnIndex::new(AnnConfig::default());
+        let mut seed = 7u64;
+        let mut lcg = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed as f64 / u64::MAX as f64) as f32 * 2.0 - 1.0
+        };
+        // 5000 nodes; ~2% are "allowed", scattered independently of position.
+        let n = 5000;
+        let mut allow = std::collections::HashSet::new();
+        let mut vecs: Vec<(String, Embedding)> = Vec::new();
+        for i in 0..n {
+            let v = Embedding(vec![lcg(), lcg(), lcg()]).normalized();
+            let id = Id(format!("n{i}"));
+            idx.insert(id.clone(), &v);
+            if i % 50 == 0 {
+                allow.insert(id.clone());
+            }
+            vecs.push((id.as_str().to_string(), v));
+        }
+        let q = Embedding(vec![1.0, 0.0, 0.0]).normalized();
+
+        // Exact filtered top-10 by brute force.
+        let mut exact: Vec<(String, f32)> = vecs
+            .iter()
+            .filter(|(id, _)| allow.contains(&Id(id.clone())))
+            .map(|(id, v)| (id.clone(), q.cosine(v)))
+            .collect();
+        exact.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let truth: std::collections::HashSet<&str> =
+            exact.iter().take(10).map(|(id, _)| id.as_str()).collect();
+
+        let got = idx.search_filtered(&q, 10, 64, &allow);
+        assert_eq!(got.len(), 10, "must fill the page from the allowed set");
+        let hit = got
+            .iter()
+            .filter(|(id, _)| truth.contains(id.as_str()))
+            .count();
+        assert!(
+            hit >= 8,
+            "filter-aware traversal recall@10 = {hit}/10 vs exact — a post-filter \
+             over a 2% filter would return near-zero"
+        );
+        // Every result is actually allowed.
+        for (id, _) in &got {
+            assert!(allow.contains(id), "{id:?} is not in the allowed set");
+        }
+    }
+
+    #[test]
+    fn search_filtered_empty_allow_is_empty() {
+        let mut idx = AnnIndex::new(AnnConfig::default());
+        for i in 0..2000 {
+            idx.insert(
+                Id(format!("n{i}")),
+                &Embedding(vec![i as f32, 1.0]).normalized(),
+            );
+        }
+        let got = idx.search_filtered(
+            &Embedding(vec![1.0, 0.0]).normalized(),
+            10,
+            64,
+            &std::collections::HashSet::new(),
+        );
+        assert!(got.is_empty());
     }
 }

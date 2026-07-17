@@ -356,6 +356,104 @@ impl ConnXRecall {
     /// scoring is *exact* over it (point lookups, no ANN approximation) and
     /// lexical BM25 is filtered to it, fused as usual. Ids in the scope that
     /// aren't documents are ignored.
+    /// Filter-aware dense search: nearest `top_k` among `allow`, via graph
+    /// traversal that admits only allowed nodes (see `AnnIndex::search_filtered`).
+    ///
+    /// This is the correct answer for a matched set too large to score exactly:
+    /// it walks the HNSW graph but only ever collects nodes the filter accepts,
+    /// so the result is the *filtered* nearest neighbours rather than the global
+    /// ones that happen to survive a post-filter. When text is present a scoped
+    /// BM25 ranking over the same allowed set fuses in, exactly like the hybrid
+    /// path. Below the ANN minimum corpus the graph is not built, so this falls back
+    /// to exact scoped scoring — which is also correct, just O(matches).
+    pub async fn filter_aware_search(
+        &self,
+        query_text: &str,
+        query: &Embedding,
+        top_k: usize,
+        allow: &std::collections::HashSet<String>,
+        weights: rro_core::HybridWeights,
+    ) -> Result<Vec<Candidate>> {
+        if top_k == 0 || allow.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Small corpus: no graph. Exact scoping is correct and cheap.
+        let has_graph = { self.ann.read().expect("ann lock").len() >= ANN_MIN_CORPUS };
+        if !has_graph {
+            return self
+                .scoped_search(query_text, query, top_k, allow.iter().cloned().collect())
+                .await;
+        }
+
+        let ann = self.ann.clone();
+        let db = self.db.clone();
+        let params = self.params;
+        let q = query.clone();
+        let terms = self.analyzer.analyze(query_text);
+        let allow_ids: std::collections::HashSet<rro_core::Id> =
+            allow.iter().map(|s| rro_core::Id(s.clone())).collect();
+        let allow_str = allow.clone();
+        let weights = weights.as_slice();
+
+        tokio::task::spawn_blocking(move || {
+            // Filter-aware dense ranking off the graph.
+            let dense: Vec<String> = {
+                let graph = ann.read().expect("ann lock");
+                graph
+                    .search_filtered(&q, top_k, top_k.max(64), &allow_ids)
+                    .into_iter()
+                    .map(|(id, _)| id.as_str().to_string())
+                    .collect()
+            };
+
+            // Lexical ranking, restricted to the allowed set.
+            let lexical: Vec<String> = if terms.is_empty() {
+                Vec::new()
+            } else {
+                let mut lex = lexical_blocking(&db, params, &terms, top_k * 4)?;
+                lex.retain(|c| allow_str.contains(c.id.as_str()));
+                lex.into_iter().map(|c| c.id.as_str().to_string()).collect()
+            };
+
+            let fused = if lexical.is_empty() {
+                dense
+            } else {
+                let lists = [dense, lexical];
+                reciprocal_rank_fusion_weighted(&lists, &weights, RRF_K)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            };
+
+            // Hydrate winners exactly from the durable vectors + doc store.
+            let vecs_cf = db.cf(CF_VECS)?;
+            let mut out = Vec::with_capacity(top_k.min(fused.len()));
+            for id in fused.into_iter().take(top_k) {
+                let score = match db.0.get_cf(vecs_cf, id.as_bytes()).map_err(rocks_err)? {
+                    Some(bytes) => q.cosine(&Embedding(keys::decode_vec(&bytes))),
+                    None => continue,
+                };
+                let mut c = Candidate::new(id.clone(), String::new(), score);
+                if let Some(doc) = db.get_json::<crate::model::StoredDoc>(CF_DOCS, id.as_bytes())? {
+                    c.text = doc.text;
+                    c.metadata = doc.metadata;
+                }
+                out.push(c);
+            }
+            out.sort_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+            });
+            Ok(out)
+        })
+        .await
+        .map_err(|e| RroError::Recall(format!("join: {e}")))?
+    }
+
+    /// Exact hybrid recall restricted to `scope`: exact cosine over the scope by
+    /// point-lookup, fused with a scoped BM25 ranking. Correct at any size; the
+    /// cost is O(scope).
     pub async fn scoped_search(
         &self,
         query_text: &str,
