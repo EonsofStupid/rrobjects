@@ -61,6 +61,30 @@ pub enum TokenKind {
     Radius,
     /// `BOX` — geo bounding box.
     BoxKw,
+    /// `DEFINE`
+    Define,
+    /// `REMOVE`
+    Remove,
+    /// `INDEX`
+    Index,
+    /// `ALIAS`
+    Alias,
+    /// `COLLECTION`
+    Collection,
+    /// `ON`
+    On,
+    /// `FOR`
+    For,
+    /// `UPDATE`
+    Update,
+    /// `DELETE`
+    Delete,
+    /// `SET`
+    Set,
+    /// `CONTENT`
+    Content,
+    /// `PAYLOAD`
+    Payload,
 
     // punctuation / operators
     /// `,`
@@ -109,6 +133,18 @@ impl fmt::Display for TokenKind {
             TokenKind::Inside => "INSIDE",
             TokenKind::Radius => "RADIUS",
             TokenKind::BoxKw => "BOX",
+            TokenKind::Define => "DEFINE",
+            TokenKind::Remove => "REMOVE",
+            TokenKind::Index => "INDEX",
+            TokenKind::Alias => "ALIAS",
+            TokenKind::Collection => "COLLECTION",
+            TokenKind::On => "ON",
+            TokenKind::For => "FOR",
+            TokenKind::Update => "UPDATE",
+            TokenKind::Delete => "DELETE",
+            TokenKind::Set => "SET",
+            TokenKind::Content => "CONTENT",
+            TokenKind::Payload => "PAYLOAD",
             TokenKind::Comma => "`,`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
@@ -314,6 +350,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 "INSIDE" => TokenKind::Inside,
                 "RADIUS" => TokenKind::Radius,
                 "BOX" => TokenKind::BoxKw,
+                "DEFINE" => TokenKind::Define,
+                "REMOVE" => TokenKind::Remove,
+                "INDEX" => TokenKind::Index,
+                "ALIAS" => TokenKind::Alias,
+                "COLLECTION" => TokenKind::Collection,
+                "ON" => TokenKind::On,
+                "FOR" => TokenKind::For,
+                "UPDATE" => TokenKind::Update,
+                "DELETE" => TokenKind::Delete,
+                "SET" => TokenKind::Set,
+                "CONTENT" => TokenKind::Content,
+                "PAYLOAD" => TokenKind::Payload,
                 "TRUE" => TokenKind::Bool(true),
                 "FALSE" => TokenKind::Bool(false),
                 "NULL" => TokenKind::Null,

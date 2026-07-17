@@ -1529,6 +1529,7 @@ dependencies = [
  "rro-client",
  "rro-core",
  "rro-net",
+ "rro-ql",
  "serde",
  "serde_json",
  "tempfile",

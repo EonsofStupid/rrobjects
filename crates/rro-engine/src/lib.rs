@@ -25,6 +25,7 @@ mod handler;
 mod ingest;
 pub mod ops;
 mod sample;
+mod sql;
 mod serve;
 
 pub use estate_map::estate_map;
@@ -45,3 +46,4 @@ pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
+pub use sql::{apply, SqlOutcome};

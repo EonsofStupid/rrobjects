@@ -36,20 +36,35 @@ mod lexer;
 mod lower;
 mod parser;
 
-pub use ast::{CmpOp, Expr, Select, Statement, Value};
+pub use ast::{CmpOp, Define, Delete, Expr, Remove, Select, Statement, Update, Value};
 pub use error::QlError;
 pub use lexer::{lex, LexError, Token, TokenKind};
 pub use lower::lower_select;
 pub use parser::parse;
 
-/// Parse RRQL text into a typed [`rro_core::EstateQuery`].
+/// Parse a **read** — RRQL text → a typed [`rro_core::EstateQuery`].
 ///
-/// The one call most callers want: text → the thing the estate executes.
+/// Reads are the case with a pure, dependency-free answer: a `SELECT` lowers to
+/// a value, and no estate is needed to produce it. Writes (`DEFINE`, `UPDATE`,
+/// `DELETE`, `REMOVE`) cannot: they name an *effect*, and this crate does not
+/// execute. They parse to a [`Statement`], and the caller — which owns an
+/// estate — applies it. That split is why `rro-ql` can stay a pure function of
+/// text with `rro-core` as its only dependency (ADR-0003).
 ///
 /// # Errors
-/// [`QlError`] with a byte span pointing at the offending text.
+/// [`QlError`] with a byte span pointing at the offending text, or a refusal if
+/// `src` is a write statement.
 pub fn parse_query(src: &str) -> Result<rro_core::EstateQuery, QlError> {
     match parse(src)? {
         Statement::Select(s) => lower_select(s),
+        other => Err(QlError::new(
+            format!(
+                "`{}` is a write, not a query — parse it with `parse()` and apply the \
+                 Statement against an estate. parse_query() returns an EstateQuery, and \
+                 a write has no query to return.",
+                other.keyword()
+            ),
+            (0, 0),
+        )),
     }
 }

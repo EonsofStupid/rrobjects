@@ -132,9 +132,101 @@ pub struct Select {
     pub limit: Option<usize>,
 }
 
-/// A parsed statement. One variant today; B2/B3 add DEFINE/CRUD/RELATE.
+/// `DEFINE INDEX ON <field>` — a payload index.
+///
+/// Only the subject the engine actually has. SurrealDB has 17 DEFINE subjects;
+/// promising `DEFINE TABLE`/`FIELD`/`EVENT` before schemas exist (Phase C4)
+/// would be a language writing cheques the engine cannot cash.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Define {
+    /// `DEFINE INDEX ON <field>` → `create_payload_index`.
+    Index {
+        /// Metadata field to index.
+        field: String,
+    },
+    /// `DEFINE ALIAS <alias> FOR <collection>` → `create_alias`.
+    Alias {
+        /// The alias name.
+        alias: String,
+        /// The collection it points at.
+        collection: String,
+    },
+}
+
+/// `REMOVE INDEX ON <field>` / `REMOVE ALIAS <a>` / `REMOVE COLLECTION <c>`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Remove {
+    /// `REMOVE ALIAS <alias>` → `delete_alias`.
+    Alias {
+        /// The alias name.
+        alias: String,
+    },
+    /// `REMOVE COLLECTION <name>` → `drop_collection`.
+    Collection {
+        /// The collection name.
+        name: String,
+    },
+}
+
+/// `UPDATE <id> SET k = v, ...` / `UPDATE <id> CONTENT {..}` — payload writes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Update {
+    /// Record id.
+    pub id: String,
+    /// `(key, value)` pairs.
+    pub set: Vec<(String, Value)>,
+    /// `CONTENT` replaces the whole payload; `SET` merges into it.
+    ///
+    /// The distinction is load-bearing: `set_payload` patches, and
+    /// `overwrite_payload` replaces. Collapsing them would silently destroy
+    /// fields the caller never mentioned.
+    pub replace: bool,
+}
+
+/// `DELETE <id>` — remove a record, or clear its payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delete {
+    /// Record id.
+    pub id: String,
+    /// `DELETE PAYLOAD <id>` clears metadata but keeps the record;
+    /// `DELETE <id>` removes the record entirely.
+    pub payload_only: bool,
+    /// `DELETE PAYLOAD <id> (k, k2)` removes only those keys.
+    pub keys: Vec<String>,
+}
+
+/// A parsed statement. B3 adds RELATE/traversal/LIVE.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// A `SELECT`.
     Select(Select),
+    /// A `DEFINE`.
+    Define(Define),
+    /// A `REMOVE`.
+    Remove(Remove),
+    /// An `UPDATE`.
+    Update(Update),
+    /// A `DELETE`.
+    Delete(Delete),
+}
+
+impl Statement {
+    /// The leading keyword, for errors that name what the caller actually sent.
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            Statement::Select(_) => "SELECT",
+            Statement::Define(_) => "DEFINE",
+            Statement::Remove(_) => "REMOVE",
+            Statement::Update(_) => "UPDATE",
+            Statement::Delete(_) => "DELETE",
+        }
+    }
+
+    /// Whether this statement mutates the estate.
+    ///
+    /// The seam a caller needs to gate writes — an MCP tool or a REST endpoint
+    /// exposed read-only can refuse on this without re-deriving the taxonomy.
+    pub fn is_write(&self) -> bool {
+        !matches!(self, Statement::Select(_))
+    }
 }

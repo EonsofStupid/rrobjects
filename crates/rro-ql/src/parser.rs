@@ -5,7 +5,7 @@
 //! is what anyone who has written SQL expects, and getting it backwards is a
 //! silent wrong-answer bug rather than a syntax error.
 
-use crate::ast::{CmpOp, Expr, Select, Statement, Value};
+use crate::ast::{CmpOp, Define, Delete, Expr, Remove, Select, Statement, Update, Value};
 use crate::error::QlError;
 use crate::lexer::{lex, Token, TokenKind};
 
@@ -108,10 +108,138 @@ impl Parser {
         if self.eat(&TokenKind::Select) {
             return Ok(Statement::Select(self.select()?));
         }
+        if self.eat(&TokenKind::Define) {
+            return Ok(Statement::Define(self.define()?));
+        }
+        if self.eat(&TokenKind::Remove) {
+            return Ok(Statement::Remove(self.remove()?));
+        }
+        if self.eat(&TokenKind::Update) {
+            return Ok(Statement::Update(self.update()?));
+        }
+        if self.eat(&TokenKind::Delete) {
+            return Ok(Statement::Delete(self.delete()?));
+        }
         Err(QlError::new(
-            format!("expected SELECT, found {}", self.peek()),
+            format!(
+                "expected SELECT, DEFINE, REMOVE, UPDATE or DELETE, found {}",
+                self.peek()
+            ),
             self.span(),
         ))
+    }
+
+    /// `DEFINE INDEX ON <field>` | `DEFINE ALIAS <a> FOR <collection>`
+    fn define(&mut self) -> Result<Define, QlError> {
+        if self.eat(&TokenKind::Index) {
+            self.expect(&TokenKind::On)?;
+            return Ok(Define::Index {
+                field: self.ident()?,
+            });
+        }
+        if self.eat(&TokenKind::Alias) {
+            let alias = self.ident()?;
+            self.expect(&TokenKind::For)?;
+            return Ok(Define::Alias {
+                alias,
+                collection: self.ident()?,
+            });
+        }
+        // Deliberately narrow. SurrealDB has 17 DEFINE subjects; this engine has
+        // payload indexes and aliases. Accepting `DEFINE TABLE` here and ignoring
+        // it would be the language lying about the engine.
+        Err(QlError::new(
+            format!(
+                "DEFINE supports INDEX and ALIAS, found {}. (TABLE/FIELD/EVENT need \
+                 schemas, which this engine does not have yet — Phase C4.)",
+                self.peek()
+            ),
+            self.span(),
+        ))
+    }
+
+    /// `REMOVE ALIAS <a>` | `REMOVE COLLECTION <c>`
+    fn remove(&mut self) -> Result<Remove, QlError> {
+        if self.eat(&TokenKind::Alias) {
+            return Ok(Remove::Alias {
+                alias: self.ident()?,
+            });
+        }
+        if self.eat(&TokenKind::Collection) {
+            return Ok(Remove::Collection {
+                name: self.ident()?,
+            });
+        }
+        Err(QlError::new(
+            format!("REMOVE supports ALIAS and COLLECTION, found {}", self.peek()),
+            self.span(),
+        ))
+    }
+
+    /// `UPDATE <id> SET k = v, ...` | `UPDATE <id> CONTENT SET k = v, ...`
+    fn update(&mut self) -> Result<Update, QlError> {
+        let id = self.record_id()?;
+        // CONTENT replaces, SET merges. Both spell their pairs the same way; the
+        // keyword picks set_payload vs overwrite_payload, and conflating them
+        // would silently drop fields the caller never mentioned.
+        let replace = if self.eat(&TokenKind::Content) {
+            true
+        } else {
+            self.expect(&TokenKind::Set)?;
+            false
+        };
+        if replace {
+            self.expect(&TokenKind::Set)?;
+        }
+        let mut set = Vec::new();
+        loop {
+            let key = self.ident()?;
+            self.expect(&TokenKind::Eq)?;
+            let value = self.value()?;
+            set.push((key, value));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(Update { id, set, replace })
+    }
+
+    /// `DELETE <id>` | `DELETE PAYLOAD <id>` | `DELETE PAYLOAD <id> (k, k2)`
+    fn delete(&mut self) -> Result<Delete, QlError> {
+        let payload_only = self.eat(&TokenKind::Payload);
+        let id = self.record_id()?;
+        let mut keys = Vec::new();
+        if payload_only && self.eat(&TokenKind::LParen) {
+            loop {
+                keys.push(self.ident()?);
+                if self.eat(&TokenKind::Comma) {
+                    continue;
+                }
+                self.expect(&TokenKind::RParen)?;
+                break;
+            }
+        }
+        Ok(Delete {
+            id,
+            payload_only,
+            keys,
+        })
+    }
+
+    /// A record id: a bare/backticked identifier, or a quoted string.
+    ///
+    /// Ids in this estate are arbitrary strings (`MED-10`, a UUID, a path), so
+    /// they must be quotable — an id-shaped grammar would reject real ids.
+    fn record_id(&mut self) -> Result<String, QlError> {
+        let span = self.span();
+        match self.bump() {
+            TokenKind::Ident(s) => Ok(s),
+            TokenKind::Str(s) => Ok(s),
+            other => Err(QlError::new(
+                format!("expected a record id, found {other}"),
+                span,
+            )),
+        }
     }
 
     fn select(&mut self) -> Result<Select, QlError> {
@@ -293,7 +421,126 @@ mod tests {
     fn sel(src: &str) -> Select {
         match parse(src).unwrap() {
             Statement::Select(s) => s,
+            other => panic!("expected a SELECT, got {}", other.keyword()),
         }
+    }
+
+    // ---- B2: DEFINE / REMOVE / UPDATE / DELETE ---------------------------
+
+    #[test]
+    fn define_index_and_alias() {
+        assert_eq!(
+            parse("DEFINE INDEX ON author").unwrap(),
+            Statement::Define(Define::Index {
+                field: "author".into()
+            })
+        );
+        assert_eq!(
+            parse("DEFINE ALIAS current FOR docs_v2").unwrap(),
+            Statement::Define(Define::Alias {
+                alias: "current".into(),
+                collection: "docs_v2".into()
+            })
+        );
+    }
+
+    /// The engine has payload indexes and aliases. SurrealDB has 17 DEFINE
+    /// subjects. Accepting `DEFINE TABLE` and ignoring it would be the language
+    /// lying about the engine — so it must be refused, and the refusal must say
+    /// why.
+    #[test]
+    fn define_table_is_refused_and_says_why() {
+        let e = parse("DEFINE TABLE docs").unwrap_err();
+        assert!(e.message.contains("INDEX and ALIAS"), "{}", e.message);
+        assert!(e.message.contains("Phase C4"), "names when it lands: {}", e.message);
+    }
+
+    #[test]
+    fn remove_alias_and_collection() {
+        assert_eq!(
+            parse("REMOVE ALIAS current").unwrap(),
+            Statement::Remove(Remove::Alias {
+                alias: "current".into()
+            })
+        );
+        assert_eq!(
+            parse("REMOVE COLLECTION beta").unwrap(),
+            Statement::Remove(Remove::Collection { name: "beta".into() })
+        );
+    }
+
+    /// SET merges, CONTENT replaces. Conflating them silently destroys fields
+    /// the caller never mentioned, so the AST keeps them distinct.
+    #[test]
+    fn update_set_merges_and_content_replaces() {
+        match parse("UPDATE doc1 SET team = 'blue', rank = 3").unwrap() {
+            Statement::Update(u) => {
+                assert_eq!(u.id, "doc1");
+                assert!(!u.replace, "SET must MERGE");
+                assert_eq!(u.set.len(), 2);
+                assert_eq!(u.set[1], ("rank".into(), Value::Num(3.0)));
+            }
+            other => panic!("{}", other.keyword()),
+        }
+        match parse("UPDATE doc1 CONTENT SET team = 'blue'").unwrap() {
+            Statement::Update(u) => assert!(u.replace, "CONTENT must REPLACE"),
+            other => panic!("{}", other.keyword()),
+        }
+    }
+
+    /// Record ids are arbitrary strings in this estate (`MED-10`, a UUID, a
+    /// path). An id-shaped grammar would reject real ids, so they are quotable.
+    #[test]
+    fn record_ids_can_be_quoted_or_bare() {
+        for src in ["DELETE doc1", "DELETE 'MED-10'", "DELETE `odd id`"] {
+            assert!(parse(src).is_ok(), "{src} should parse");
+        }
+    }
+
+    #[test]
+    fn delete_record_vs_payload_vs_keys() {
+        match parse("DELETE doc1").unwrap() {
+            Statement::Delete(d) => {
+                assert!(!d.payload_only, "DELETE <id> removes the RECORD");
+                assert!(d.keys.is_empty());
+            }
+            other => panic!("{}", other.keyword()),
+        }
+        match parse("DELETE PAYLOAD doc1").unwrap() {
+            Statement::Delete(d) => {
+                assert!(d.payload_only, "DELETE PAYLOAD keeps the record");
+                assert!(d.keys.is_empty(), "no keys = clear the whole payload");
+            }
+            other => panic!("{}", other.keyword()),
+        }
+        match parse("DELETE PAYLOAD doc1 (team, rank)").unwrap() {
+            Statement::Delete(d) => {
+                assert!(d.payload_only);
+                assert_eq!(d.keys, vec!["team".to_string(), "rank".to_string()]);
+            }
+            other => panic!("{}", other.keyword()),
+        }
+    }
+
+    #[test]
+    fn writes_are_flagged_as_writes() {
+        // The seam a read-only MCP tool or REST endpoint gates on.
+        assert!(!parse("SELECT *").unwrap().is_write());
+        for src in [
+            "DEFINE INDEX ON a",
+            "REMOVE ALIAS x",
+            "UPDATE d SET a = 1",
+            "DELETE d",
+        ] {
+            assert!(parse(src).unwrap().is_write(), "{src} mutates the estate");
+        }
+    }
+
+    #[test]
+    fn a_write_sent_to_parse_query_is_refused_with_the_fix() {
+        let e = crate::parse_query("DELETE doc1").unwrap_err();
+        assert!(e.message.contains("is a write"), "{}", e.message);
+        assert!(e.message.contains("parse()"), "names the right call: {}", e.message);
     }
 
     #[test]

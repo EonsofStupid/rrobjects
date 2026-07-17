@@ -33,6 +33,7 @@ connectome = { workspace = true }
 connxism = { workspace = true }
 rrd = { workspace = true }
 rro-net = { workspace = true }
+rro-ql = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
