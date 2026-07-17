@@ -182,7 +182,7 @@ async fn llamacpp_and_vllm_agree_on_order() {
 #[cfg(feature = "candle")]
 #[tokio::test]
 #[ignore]
-async fn candle_reranker_lifts_over_bm25() {
+async fn candle_reranker_does_not_regress_vs_bm25() {
     let Ok(dir) = std::env::var("RRO_TEST_QWEN_RERANK_WEIGHTS") else {
         eprintln!("SKIP: set RRO_TEST_QWEN_RERANK_WEIGHTS");
         return;
@@ -194,6 +194,10 @@ async fn candle_reranker_lifts_over_bm25() {
     let ce = golden_at_1(&r).await;
     println!("  => BM25 {bm25:.2} -> candle {ce:.2}");
 
+    // NAME NOTE: this asserts NO REGRESSION, not lift, and is named for what it
+    // checks. It was `candle_reranker_lifts_over_bm25`, which claimed a gate the
+    // assertion does not enforce — exactly the theatre the finding below rejects.
+    //
     // RECORDED FINDING (2026-07-16, qwen3-reranker-0-6b): candle scores 0.50
     // here — no lift. This is the MODEL, not the backend. Proof:
     //   * case 1 separates cleanly: 0.9995 / 0.3200 / 0.0727 / 0.0005

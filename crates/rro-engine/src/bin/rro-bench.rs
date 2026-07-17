@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use embedder::DeterministicEmbedder;
+use model_registry::build_embedder;
 use recall::FlatRecall;
 use rro_core::{Document, Embedder, Recall};
 use rro_engine::{spawn_ingest, IngestConfig, ObjectConfig, ReasonReadyObject};
@@ -218,7 +218,31 @@ async fn main() -> anyhow::Result<()> {
 
     let remote = opt_arg_str("--remote");
     let full_flow = std::env::args().any(|a| a == "--full-flow");
-    let embedder: Arc<dyn Embedder> = Arc::new(DeterministicEmbedder::new());
+
+    // Honour RRO_EMBEDDER, defaulting to the weightless hash embedder.
+    //
+    // The default is deliberate and stays: this harness measures the *engine* —
+    // ingest throughput, query p50/p95/p99 — and a real model would drown those
+    // numbers in its own forward pass (measured elsewhere: engine ~3.9 ms, model
+    // ~1124 ms, so 99.65% of a real wall clock is the model). Benchmarking the
+    // engine through a 4B model measures the 4B model.
+    //
+    // But it used to be *hardcoded*, and `--export` shares this embedder. So the
+    // command `real_vector_ef.rs` documents for producing real vectors —
+    // `RRO_EMBEDDER=llamacpp cargo run --bin rro-bench -- --export ...` —
+    // silently ignored the variable and wrote 384-d **hash** vectors. The test
+    // that exists precisely because "the ANN gate has only ever run on synthetic
+    // vectors" was being handed synthetic vectors by its own instructions.
+    let ecfg = model_registry::EmbedderConfig::from_env()?;
+    let embedder: Arc<dyn Embedder> = build_embedder(&ecfg).await?;
+    if ecfg.kind != model_registry::EmbedderKind::Deterministic {
+        eprintln!(
+            "embedder: {} ({}) dim={} — NOTE: latency below now includes model time",
+            ecfg.kind.as_str(),
+            embedder.model_name(),
+            embedder.dim()
+        );
+    }
 
     // planted-v1 corpus: noise docs + one golden doc per query.
     let mut seed = 0x5EED_u64;
