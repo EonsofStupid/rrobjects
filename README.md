@@ -102,7 +102,7 @@ Deploy: **Podman Quadlets** — `deploy/Containerfile` (build),
 `deploy/rro-mesh.pod` (cluster node group), `deploy/config.env.example`. The
 daemon handles the full signal set, drains cleanly, and commits its RRD baseline
 on shutdown so the next boot predicts warm. Install (rootless):
-`install -m644 deploy/rro.container ~/.config/containers/systemd/ && systemctl --user daemon-reload && systemctl --user start rrf`.
+`install -m644 deploy/rro.container ~/.config/containers/systemd/ && systemctl --user daemon-reload && systemctl --user start rro`.
 
 **Model backends** (real Qwen embedder / Nemotron reranker) plug in behind the
 `Embedder`/`Reranker` traits, selected by `RRO_EMBEDDER`/`RRO_RERANKER` — the
@@ -124,7 +124,7 @@ cluster, deploy) is in **docs/ROADMAP_REAL.md**.
 | `connxism` | The kvs-connectome estate: RocksDB, hybrid recall, relations, changefeed, warp points |
 | `connectors` | Resumable source drivers + the sync engine (RRD-first) |
 | `rro-net` | a2a layer-2: in-proc bus + TCP; MCP mesh binding lands P5 |
-| `rro-engine` | The orchestrator, `rrf` daemon, `rro-bench` harness |
+| `rro-engine` | The orchestrator, `rro` daemon, `rro-bench` harness |
 
 ## Where everything stands
 

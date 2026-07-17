@@ -5,9 +5,9 @@
 #
 #   mkdir -p ~/.config/containers/systemd
 #   install -m644 deploy/rro.container   ~/.config/containers/systemd/rro.container
-#   install -m640 deploy/config.env.example ~/.config/rrf/config.env   # then edit
+#   install -m640 deploy/config.env.example ~/.config/rro/config.env   # then edit
 #   systemctl --user daemon-reload
-#   systemctl --user start rrf
+#   systemctl --user start rro
 #
 # Rootful install: put the file in /etc/containers/systemd/ and use
 # `systemctl` (no --user). Verify generation with:
@@ -18,23 +18,23 @@
 # line below (uncomment), pointing RRO_EMBEDDER/RRO_RERANKER at them.
 
 [Unit]
-Description=Reason Ready engine (rrf) — a2a node
+Description=Reason Ready Objects (RRO) — a2a node
 After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=localhost/rrf:latest
+Image=localhost/rro:latest
 # Pull policy: never for locally-built images; set to newer for a registry.
 PullPolicy=never
 # The a2a warp-point listener and the ops/metrics port.
 PublishPort=7878:7878
 PublishPort=9090:9090
 # Durable estate lives in a named volume (survives restarts/updates).
-Volume=rro-estate.volume:/var/lib/rrf:Z
+Volume=rro-estate.volume:/var/lib/rro:Z
 # Model weights, when running candle backends. Mount a host dir of
 # .safetensors/tokenizer.json and point RRO_EMBEDDER_WEIGHTS at it.
-# Volume=/srv/rrf/models:/var/lib/rrf/models:ro,Z
-EnvironmentFile=%h/.config/rrf/config.env
+# Volume=/srv/rro/models:/var/lib/rro/models:ro,Z
+EnvironmentFile=%h/.config/rro/config.env
 # Clean drain: the daemon commits its RRD baseline on SIGTERM.
 Environment=RUST_LOG=info
 

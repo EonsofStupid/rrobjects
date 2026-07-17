@@ -1,11 +1,11 @@
 # Reason Ready — OCI image, built with Podman (rootless-friendly, multi-stage).
 #
-#   podman build -f deploy/Containerfile -t localhost/rrf:latest .
+#   podman build -f deploy/Containerfile -t localhost/rro:latest .
 #
 # The `candle` feature is OFF here (weightless default image). For a
 # model-backed image, build with:
-#   podman build -f deploy/Containerfile --build-arg FEATURES=candle -t localhost/rrf:candle .
-# and mount weights at runtime (see deploy/rrf.container).
+#   podman build -f deploy/Containerfile --build-arg FEATURES=candle -t localhost/rro:candle .
+# and mount weights at runtime (see deploy/rro.container).
 
 FROM docker.io/library/rust:1-bookworm AS build
 ARG FEATURES=""
@@ -21,17 +21,17 @@ RUN if [ -n "$FEATURES" ]; then \
 FROM docker.io/library/debian:bookworm-slim
 # Rootless: the container runs as an unprivileged uid; podman maps it via
 # user namespaces. No USER root work beyond dir creation.
-RUN useradd --system --uid 10001 --home /var/lib/rrf rrf \
-    && mkdir -p /var/lib/rrf /var/lib/rrf/models && chown -R rrf /var/lib/rrf
+RUN useradd --system --uid 10001 --home /var/lib/rro rro \
+    && mkdir -p /var/lib/rro /var/lib/rro/models && chown -R rro /var/lib/rro
 COPY --from=build /src/target/release/rro /src/target/release/rro-bench /usr/local/bin/
 USER 10001
 # The daemon reads RRO_* (see crates/rro-engine/src/bin/rro.rs); these MUST use
 # that prefix or the estate/listener/events silently fall back to disabled.
-ENV RRO_ESTATE=/var/lib/rrf/estate \
+ENV RRO_ESTATE=/var/lib/rro/estate \
     RRO_LISTEN=0.0.0.0:7878 \
-    RRO_EVENTS=/var/lib/rrf/events.jsonl \
+    RRO_EVENTS=/var/lib/rro/events.jsonl \
     RRO_OPS_ADDR=0.0.0.0:9090 \
     RUST_LOG=info
 EXPOSE 7878 9090
-VOLUME /var/lib/rrf
+VOLUME /var/lib/rro
 ENTRYPOINT ["/usr/local/bin/rro"]
