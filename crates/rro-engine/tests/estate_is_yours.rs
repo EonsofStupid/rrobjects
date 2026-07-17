@@ -40,9 +40,21 @@ fn a2a(addr: &str, msg: serde_json::Value) -> serde_json::Value {
     serde_json::from_str(&line).unwrap()
 }
 
-/// Spawn the daemon and wait for it to answer, so the test isn't a race.
+/// Wait for the daemon to answer, so the test isn't a race.
+///
+/// 90s, not 30s. This spawns the **debug** binary (`CARGO_BIN_EXE_rro`) — an
+/// unoptimised RocksDB open plus HNSW rebuild — and `cargo test --workspace`
+/// runs several suites at once. On a box already busy (this one was embedding
+/// 50k documents at the time) 30s expired and the test failed with "daemon never
+/// came up", which reads exactly like a real bug and is not one.
+///
+/// Recorded because the first diagnosis of that failure was a TOCTOU port race,
+/// which was a guess: `free_port()` releases the port before the daemon binds it,
+/// so the theory was plausible. It was also wrong — the test passes 8/8 in
+/// isolation *and* 283/283 in a workspace run once the box is quiet. Fix the
+/// cause you measured, not the one you thought of first.
 fn wait_ready(addr: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         if std::net::TcpStream::connect(addr).is_ok() {
             return;

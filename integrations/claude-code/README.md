@@ -66,8 +66,13 @@ With it, the estate is yours and is never seeded (`estate_is_yours.rs`).
   memories. On a small estate that is harmless noise; it will not stay harmless.
   Fixing it needs score-magnitude fusion (DBSF) or a server-side-embed +
   `score_threshold` path, neither of which exists yet.
-- **Capture is gated by a crude heuristic** (length + a stoplist), not by RRD.
-  RRD's gate ladder is exactly the right tool and is already wired into `ask` —
-  but not into `index`. That is the honest fix.
+- **Capture is gated by a crude heuristic** (machine-text rejection + length +
+  a stoplist), not by RRD. RRD's gate ladder is exactly the right tool and is
+  already wired into `ask` — but not into `index`. That is the honest fix.
+  The first cut of this heuristic checked only length, and machine text walked
+  straight in: `<task-notification>` blocks were stored as `operator_prompt` and
+  recalled back as "prior facts, decisions and operator corrections". They are
+  none of those. If you see the estate quoting the harness at you, that is this
+  filter failing — widen `worth_remembering`, do not widen the recall.
 - **The readiness label in the block is currently meaningless** (it reads
   `insufficient @ 0.00` even for a perfect hit) for the same lexical reason.

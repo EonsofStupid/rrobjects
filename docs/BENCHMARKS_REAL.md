@@ -309,3 +309,112 @@ configuration anyone actually ships.
 lexical signal, which is the one case it earns its place. Changing a default that
 every existing caller inherits is a measured decision, not a drive-by — it needs
 the train/dev/test split, not this page.
+
+---
+
+## Finding 5 — the three engines, PROVEN (the gates CI never ran)
+
+_2026-07-17, GB10. 28 tests were `#[ignore]`-gated on weights and live servers,
+and `ci.yml` has never run one — no `--run-ignored` anywhere. Every claim about
+candle, llama.cpp and vLLM was an assertion. These are the numbers._
+
+### The vendored candle encoder reproduces the model card to 6 decimals
+
+`card_reference_scores`, the strong gate (MODELS.md only asks for
+`king~queen > king~banana`, which is weak — single tokens pass identically under
+last-token *or* mean pooling and cannot detect the pooling bug this backend exists
+to avoid):
+
+```
+got:  [[0.7645573, 0.1414254], [0.13549742, 0.5999547]]
+want: [[0.7645568, 0.14142509], [0.13549736, 0.59995496]]
+```
+
+A hand-written, cache-free Qwen3 encoder landing on Qwen's published reference
+matrix. Supporting gates: `batching_matches_single` = **1.000000** (left-padding
+and last-token pooling are correct — this is the one that would catch a padding
+bug), MRL@256 stays semantic (0.8322 vs 0.7074), paraphrase 0.7143 vs unrelated
+0.2098, query/document asymmetry applied (0.7851 for the same text on both paths).
+
+### Two independent implementations agree — on identical weights
+
+The agreement test needed care: `:8090` serves the **4B**, and candle was running
+the **0.6B**. Comparing those would have produced a meaningless number. Fetched
+`Qwen3-Embedding-0.6B-f16.gguf` and served it on `:8095` with `--pooling last`, so
+both engines run the *same weights at the same precision*:
+
+| | reference matrix |
+|---|---|
+| published card | `[[0.7646, 0.1414], [0.1355, 0.6000]]` |
+| **candle** (vendored Rust) | `[[0.7646, 0.1414], [0.1355, 0.6000]]` |
+| **llama.cpp** (C++) | `[[0.7646, 0.1418], [0.1361, 0.6017]]` |
+
+Separation margin: candle 0.4645, llama.cpp 0.4656. Batched-vs-single order
+preserved at 0.999985. **Three-way cross-check: two independent implementations
+and the published card all agree.** That is stronger evidence than either engine's
+own gate, because two implementations of one contract can only agree by both being
+right.
+
+### The rerankers lift — and BM25 fails exactly as Finding 4 predicts
+
+| engine | golden@1 |
+|---|---|
+| BM25 (`LexicalReranker`) | 0.50 |
+| **llama.cpp** (nemotron-rerank-1b-v2) | **1.00** |
+| **vLLM** (same model) | **1.00** |
+| candle (qwen3-reranker-0.6b) | 0.50 |
+
+llama.cpp and vLLM agree on exact ordering (`["d3","d1","d0","d2"]` and
+`["d2","d0","d1","d3"]`). BM25's failure is Finding 4 in miniature: for *"How do
+plants make food from sunlight?"* it ranks **"Plants need food and sunlight to grow
+well in a garden"** first — pure lexical overlap — over **"Photosynthesis is the
+process by which plants convert light energy into chemical energy"**.
+
+**candle at 0.50 is the model, not the backend**, and was already diagnosed in the
+test: the 0.6B *saturates* — gold 0.989082 loses to 0.989714 by 0.0006, and a
+nonsense distractor still scores 0.942. Classic small-cross-encoder behaviour. Its
+calibration is near-perfect on the separable case (0.9995 vs 0.000036). The tier
+ladder gets decided by BRIGHT at scale, not by n=2.
+
+### The constrained classifier beats the heuristic — at exactly Finding 4's flaw
+
+```
+heuristic: ready=true  label=ready
+model:     ready=false label=insufficient conf=0.7933
+  "The provided context does not contain any information about the capital of China."
+=> LIFT: the heuristic was fooled by lexical overlap; the model was not.
+```
+
+The readiness third of Finding 4 already has its fix built. The heuristic says
+*ready* to context that does not answer the question, because it counts shared
+terms. The constrained-decode judge does not.
+
+### The ANN gate, on real vectors for the first time
+
+`ann.rs` gates recall@10 ≥ 0.95, and that gate had only ever run on `lcg` uniform
+noise. Real embeddings are anisotropic and concentrate; noise says nothing about
+them. On **2,200 real 2560-d Qwen3-4B vectors**:
+
+| ef | recall@10 | µs/query |
+|---:|---:|---:|
+| 4 | 0.9680 | 305.7 |
+| 16 | 0.9880 | 407.7 |
+| 64 *(default)* | **0.9990** | 974.9 |
+| 100 | 1.0000 | 1244.9 |
+
+**The default `ef_search=64` holds the gate on real vectors: 0.9990.**
+
+⚠️ **It also passes at ef=4, and that is a warning, not a win.** At 2,200 vectors
+the graph is nearly fully connected and near-exhaustive search flatters recall —
+passing at ef=4 is a statement about the corpus, not the index. A 50k-vector run
+is the honest gate. Not treated as tuned until then.
+
+### A bug this phase found in its own instructions
+
+`real_vector_ef.rs` documents `RRO_EMBEDDER=llamacpp cargo run --bin rro-bench --
+--export ...` to produce its real vectors. **`rro-bench` hardcoded
+`DeterministicEmbedder` and ignored the variable**, writing 384-d *hash* vectors.
+The test that exists precisely because "the ANN gate has only ever run on synthetic
+vectors" was being fed synthetic vectors by its own setup — and would have
+re-published the synthetic gate under the word "real". Caught only because 384 ≠
+2560. Fixed; the export now reports `dim=2560`.

@@ -59,19 +59,35 @@ def a2a(msg: dict, timeout: float) -> dict:
 def worth_remembering(prompt: str) -> bool:
     """Is this prompt worth putting in the operator's durable memory?
 
-    Deliberately conservative. The daemon shipped a bug where it wrote demo
-    documents into a persistent estate on every start, and the lesson generalises:
-    an estate full of "go", "read", "continue please" is an estate whose recall is
-    noise. Precision beats coverage here — a memory you cannot trust is one you
-    stop reading.
+    Deliberately conservative, and it has already been wrong once. The first cut
+    filtered on length plus a stoplist, which let **machine text straight in**:
+    `<task-notification>` blocks were stored as `operator_prompt` and then
+    recalled back as "prior facts, decisions and operator corrections". They are
+    none of those. An estate full of its own exhaust is an estate whose recall is
+    noise — the same bug as the daemon seeding demo docs, reintroduced one layer
+    up.
 
-    This is a **heuristic**, and a crude one: length, plus a stoplist of pure
-    acknowledgements. The right tool is RRD's gate ladder, which exists to decide
-    exactly this and is already wired into `ask` — but not into `index`. Routing
-    capture through the gate is the honest version of this function; until then
-    it says so rather than pretending to be clever.
+    Precision beats coverage here. A memory you cannot trust is one you stop
+    reading, and the whole point is the operator's own words: "you aggressively do
+    not deprecate", "RRO was never banned" — the sentences that, once forgotten,
+    get re-litigated for days.
+
+    Still a **heuristic**. The right tool is RRD's gate ladder, which exists to
+    decide exactly this and is already wired into `ask` — but not into `index`.
+    Routing capture through the gate is the honest version of this function.
     """
     p = prompt.strip()
+
+    # Machine text, not the operator. Harness notifications, hook output (never
+    # capture our own recall — it feeds itself), and system reminders.
+    machine = (
+        "<task-notification>", "<system-reminder>", "<rro-recall>",
+        "[SYSTEM NOTIFICATION", "<command-name>", "<local-command-stdout>",
+        "Caveat: The messages below were generated",
+    )
+    if any(m in p for m in machine):
+        return False
+
     if len(p) < 120:
         return False
     if p.lower().rstrip(".!") in {
