@@ -26,6 +26,27 @@ use std::sync::{Arc, Mutex};
 
 use rro_core::{Embedding, Id};
 
+/// How the graph stores its vectors. Anything but `None` is lossy and expects
+/// the caller (holding the durable full-precision vectors elsewhere) to rescore
+/// the returned candidates — quantization is a memory/IO decision, never a
+/// silent accuracy one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quantizer {
+    /// Full-precision `f32` — exact, largest (4 bytes/dim).
+    None,
+    /// Scalar quantization — 1 byte/dim (~4× smaller). Approximate.
+    Sq8,
+    /// Binary quantization — 1 bit/dim (~32× smaller). Coarse; traversal code.
+    Bq,
+}
+
+impl Quantizer {
+    /// Whether this quantizer is lossy (needs rescore).
+    pub fn is_lossy(self) -> bool {
+        self != Quantizer::None
+    }
+}
+
 /// Tuning for the graph.
 #[derive(Debug, Clone)]
 pub struct AnnConfig {
@@ -35,9 +56,8 @@ pub struct AnnConfig {
     pub ef_construction: usize,
     /// Default beam width while searching (callers may pass larger).
     pub ef_search: usize,
-    /// Store vectors as SQ8 codes (~4× smaller). Scores become approximate;
-    /// callers holding the full-precision vectors elsewhere should rescore.
-    pub quantized: bool,
+    /// How vectors are stored (full / SQ8 / BQ). Lossy modes rescore.
+    pub quantizer: Quantizer,
 }
 
 impl Default for AnnConfig {
@@ -46,7 +66,7 @@ impl Default for AnnConfig {
             m: 16,
             ef_construction: 100,
             ef_search: 64,
-            quantized: false,
+            quantizer: Quantizer::None,
         }
     }
 }
@@ -314,24 +334,53 @@ impl<T: bytemuck::Pod> MappedVec<T> {
     }
 }
 
-/// Vector storage: full-precision `f32` or SQ8 codes with per-vector params.
-/// Both keep their raw data in a [`MappedVec`], so either precision can be
-/// paged from disk; the SQ8 `params` stay in RAM (tiny next to the codes).
+/// Vector storage: full-precision `f32`, SQ8 codes (1 byte/dim + per-vector
+/// params), or BQ sign bits (1 bit/dim, paramless). All keep their raw data in a
+/// [`MappedVec`], so any precision can be paged from disk; the SQ8 `params` stay
+/// in RAM (tiny next to the codes). The per-vector *unit* differs — `dim` f32 or
+/// bytes for Full/SQ8, `bq_bytes(dim)` bytes for BQ — so each arm passes its own.
 enum Store {
     Full(MappedVec<f32>),
     Sq8 {
         codes: MappedVec<u8>,
         params: Vec<crate::quant::SqParams>,
     },
+    Bq {
+        bits: MappedVec<u8>,
+    },
 }
 
 impl Store {
+    /// An empty in-RAM store for `quantizer`.
+    fn empty(quantizer: Quantizer) -> Store {
+        match quantizer {
+            Quantizer::None => Store::Full(MappedVec::in_ram()),
+            Quantizer::Sq8 => Store::Sq8 {
+                codes: MappedVec::in_ram(),
+                params: Vec::new(),
+            },
+            Quantizer::Bq => Store::Bq {
+                bits: MappedVec::in_ram(),
+            },
+        }
+    }
+
+    /// The quantizer this store variant corresponds to — the store tag's meaning.
+    fn quantizer(&self) -> Quantizer {
+        match self {
+            Store::Full(_) => Quantizer::None,
+            Store::Sq8 { .. } => Quantizer::Sq8,
+            Store::Bq { .. } => Quantizer::Bq,
+        }
+    }
+
     fn push(&mut self, v: &[f32]) {
         match self {
             Store::Full(vectors) => vectors.push(v),
             Store::Sq8 { codes, params } => {
                 params.push(crate::quant::quantize_into(v, &mut codes.tail));
             }
+            Store::Bq { bits } => crate::quant::bq_encode_into(v, &mut bits.tail),
         }
     }
 
@@ -342,6 +391,9 @@ impl Store {
             Store::Full(vectors) => vectors.with(node, dim, |v| rro_core::simd::dot(v, q)),
             Store::Sq8 { codes, params } => codes.with(node, dim, |c| {
                 crate::quant::dot_query(c, &params[node as usize], q, qsum)
+            }),
+            Store::Bq { bits } => bits.with(node, crate::quant::bq_bytes(dim), |b| {
+                crate::quant::bq_dot_query(b, q)
             }),
         }
     }
@@ -358,6 +410,12 @@ impl Store {
                     crate::quant::dot_codes(ca, &params[a as usize], cb, &params[b as usize])
                 })
             }),
+            Store::Bq { bits } => {
+                let u = crate::quant::bq_bytes(dim);
+                bits.with(a, u, |ba| {
+                    bits.with(b, u, |bb| crate::quant::bq_dot_codes(ba, bb, dim))
+                })
+            }
         }
     }
 
@@ -367,6 +425,9 @@ impl Store {
             Store::Full(vectors) => vectors.with(node, dim, <[f32]>::to_vec),
             Store::Sq8 { codes, params } => codes.with(node, dim, |c| {
                 crate::quant::decode(c, &params[node as usize])
+            }),
+            Store::Bq { bits } => bits.with(node, crate::quant::bq_bytes(dim), |b| {
+                crate::quant::bq_decode(b, dim)
             }),
         }
     }
@@ -378,6 +439,7 @@ impl Store {
             Store::Sq8 { codes, params } => {
                 codes.logical_bytes() + params.len() * std::mem::size_of::<crate::quant::SqParams>()
             }
+            Store::Bq { bits } => bits.logical_bytes(),
         }
     }
 
@@ -390,6 +452,7 @@ impl Store {
             Store::Sq8 { codes, params } => {
                 codes.heap_bytes() + params.len() * std::mem::size_of::<crate::quant::SqParams>()
             }
+            Store::Bq { bits } => bits.heap_bytes(),
         }
     }
 }
@@ -438,14 +501,7 @@ pub struct AnnIndex {
 impl AnnIndex {
     /// An empty graph.
     pub fn new(config: AnnConfig) -> Self {
-        let store = if config.quantized {
-            Store::Sq8 {
-                codes: MappedVec::in_ram(),
-                params: Vec::new(),
-            }
-        } else {
-            Store::Full(MappedVec::in_ram())
-        };
+        let store = Store::empty(config.quantizer);
         AnnIndex {
             config,
             dim: None,
@@ -470,10 +526,15 @@ impl AnnIndex {
         self.live == 0
     }
 
-    /// Whether vector storage is SQ8 (scores approximate — rescore if the
-    /// full-precision vectors are available elsewhere).
+    /// Whether vector storage is lossy (SQ8 or BQ) — scores approximate, rescore
+    /// if the full-precision vectors are available elsewhere.
     pub fn is_quantized(&self) -> bool {
-        self.config.quantized
+        self.config.quantizer.is_lossy()
+    }
+
+    /// The quantizer this graph stores vectors under.
+    pub fn quantizer(&self) -> Quantizer {
+        self.config.quantizer
     }
 
     /// Bytes held by vector storage (graph links excluded).
@@ -841,6 +902,11 @@ impl AnnIndex {
                 codes.write_all(&mut w);
                 write_params(&mut w, params);
             }
+            Store::Bq { bits } => {
+                w.push(2);
+                w.extend_from_slice(&(bits.len() as u64).to_le_bytes());
+                bits.write_all(&mut w);
+            }
         }
         w
     }
@@ -877,11 +943,17 @@ impl AnnIndex {
                 let params = read_params(&mut r)?;
                 Store::Sq8 { codes, params }
             }
+            2 => {
+                let blen = r.u64()? as usize;
+                let mut bits = MappedVec::in_ram();
+                bits.tail = r.take(blen)?.to_vec();
+                Store::Bq { bits }
+            }
             _ => return None,
         };
-        // The store tag must agree with how this estate is configured, or a
-        // quantized estate would load full vectors (or vice versa) and score wrong.
-        if matches!(store, Store::Sq8 { .. }) != config.quantized {
+        // The store tag must agree with how this estate is configured, or a graph
+        // stored under one quantizer would be read under another and score wrong.
+        if store.quantizer() != config.quantizer {
             return None;
         }
         Some(head.into_index(config, store))
@@ -910,6 +982,7 @@ impl AnnIndex {
                 w.push(1);
                 write_params(&mut w, params);
             }
+            Store::Bq { .. } => w.push(2),
         }
         w
     }
@@ -924,6 +997,7 @@ impl AnnIndex {
         match &self.store {
             Store::Full(v) => v.stream_to(w),
             Store::Sq8 { codes, .. } => codes.stream_to(w),
+            Store::Bq { bits } => bits.stream_to(w),
         }
     }
 
@@ -936,6 +1010,7 @@ impl AnnIndex {
         match &self.store {
             Store::Full(v) => v.needs_flush(),
             Store::Sq8 { codes, .. } => codes.needs_flush(),
+            Store::Bq { bits } => bits.needs_flush(),
         }
     }
 
@@ -960,48 +1035,66 @@ impl AnnIndex {
             return None;
         }
         let head = Head::read(&mut r)?;
-        let quantized = match r.u8()? {
-            0 => false,
-            1 => true,
+        let quantizer = match r.u8()? {
+            0 => Quantizer::None,
+            1 => Quantizer::Sq8,
+            2 => Quantizer::Bq,
             _ => return None,
         };
-        if quantized != config.quantized {
+        if quantizer != config.quantizer {
             return None;
         }
+        // SQ8 params travel in the structure blob and must be read regardless of
+        // whether the graph is empty (they follow the store tag).
+        let params = if quantizer == Quantizer::Sq8 {
+            Some(read_params(&mut r)?)
+        } else {
+            None
+        };
         let n = head.ids.len();
         let dim = head.dim.unwrap_or(0);
-        let elems = n.checked_mul(dim)?;
         // An empty graph has no vectors and no file to page — stay in-RAM.
         if n == 0 {
-            let store = if quantized {
-                Store::Sq8 {
-                    codes: MappedVec::in_ram(),
-                    params: Vec::new(),
-                }
-            } else {
-                Store::Full(MappedVec::in_ram())
-            };
-            return Some(head.into_index(config, store));
+            return Some(head.into_index(config, Store::empty(quantizer)));
         }
+        if let Some(p) = &params {
+            if p.len() != n {
+                return None; // one param per vector
+            }
+        }
+        // Elements per vector in the file's unit type, and the exact file size the
+        // structure implies. A sidecar of any other length is a skew → reject.
+        let (unit, expected_bytes) = match quantizer {
+            Quantizer::None => (dim, n * dim * std::mem::size_of::<f32>()),
+            Quantizer::Sq8 => (dim, n * dim),
+            Quantizer::Bq => {
+                let u = crate::quant::bq_bytes(dim);
+                (u, n * u)
+            }
+        };
         let file_bytes = vectors.metadata().ok()?.len() as usize;
-        let store = if quantized {
-            let params = read_params(&mut r)?;
-            // One code byte per dim; the sidecar must match the structure exactly.
-            if params.len() != n || file_bytes != elems {
-                return None;
-            }
-            Store::Sq8 {
-                codes: MappedVec::paged(PagedBase::new(vectors, dim, n, cache_budget_bytes), elems),
-                params,
-            }
-        } else {
-            if file_bytes != elems * std::mem::size_of::<f32>() {
-                return None;
-            }
-            Store::Full(MappedVec::paged(
-                PagedBase::new(vectors, dim, n, cache_budget_bytes),
-                elems,
-            ))
+        if file_bytes != expected_bytes {
+            return None;
+        }
+        let base_len = n * unit;
+        let store = match quantizer {
+            Quantizer::None => Store::Full(MappedVec::paged(
+                PagedBase::new(vectors, unit, n, cache_budget_bytes),
+                base_len,
+            )),
+            Quantizer::Sq8 => Store::Sq8 {
+                codes: MappedVec::paged(
+                    PagedBase::new(vectors, unit, n, cache_budget_bytes),
+                    base_len,
+                ),
+                params: params.expect("sq8 params"),
+            },
+            Quantizer::Bq => Store::Bq {
+                bits: MappedVec::paged(
+                    PagedBase::new(vectors, unit, n, cache_budget_bytes),
+                    base_len,
+                ),
+            },
         };
         Some(head.into_index(config, store))
     }
@@ -1231,7 +1324,7 @@ mod tests {
         let n = 5000;
         let dim = 64;
         let mut idx = AnnIndex::new(AnnConfig {
-            quantized: true,
+            quantizer: Quantizer::Sq8,
             ..AnnConfig::default()
         });
         let mut vecs = Vec::with_capacity(n);
@@ -1274,6 +1367,87 @@ mod tests {
         assert!(
             recall >= 0.90,
             "quantized recall@10 = {recall:.3}, gate is 0.90"
+        );
+    }
+
+    #[test]
+    fn binary_quantization_gate_memory_and_rescored_recall() {
+        // BQ is a high-dimensional technique — sign bits carry more of the cosine
+        // signal as `dim` grows — so this gate uses a representative dim, not the
+        // 64-d of the SQ8 gate where 1-bit quantization is adversarially coarse.
+        let n = 3000;
+        let dim = 128;
+        let mut idx = AnnIndex::new(AnnConfig {
+            quantizer: Quantizer::Bq,
+            ..AnnConfig::default()
+        });
+        let mut vecs = Vec::with_capacity(n);
+        for i in 0..n {
+            let e = Embedding(pseudo_vec(i as u64, dim));
+            idx.insert(Id::new(format!("v{i}")), &e);
+            vecs.push(e.normalized());
+        }
+        assert_eq!(idx.quantizer(), Quantizer::Bq);
+
+        // Memory: 1 bit/dim, so ~32× smaller than full f32.
+        let full_bytes = n * dim * 4;
+        let bq_bytes = idx.vector_bytes();
+        assert!(
+            bq_bytes * 20 < full_bytes,
+            "BQ must shrink vector memory ≥20×: {bq_bytes} vs {full_bytes}"
+        );
+
+        // BQ is a *traversal* code: it walks the graph cheaply, then candidates are
+        // rescored exactly from the full-precision vectors (what connxism does from
+        // CF_VECS). We measure both — raw BQ (coarse) and BQ + exact rescore of an
+        // oversampled candidate set (the product behavior) — and gate the latter.
+        let queries = 100;
+        let (mut raw_found, mut resc_found, mut total) = (0usize, 0usize, 0usize);
+        for qi in 0..queries {
+            let q = Embedding(pseudo_vec(1_000_000 + qi as u64, dim));
+            let qn = q.normalized();
+            let truth = exact_top_k(&vecs, &q, 10);
+
+            let raw: Vec<usize> = idx
+                .search(&q, 10, 128)
+                .into_iter()
+                .filter_map(|(id, _)| id.as_str()[1..].parse().ok())
+                .collect();
+
+            // Oversample 10→80 on BQ, then rescore exactly and keep the top 10.
+            let mut cands: Vec<usize> = idx
+                .search(&q, 80, 200)
+                .into_iter()
+                .filter_map(|(id, _)| id.as_str()[1..].parse().ok())
+                .collect();
+            cands.sort_by(|&a, &b| vecs[b].cosine(&qn).total_cmp(&vecs[a].cosine(&qn)));
+            let rescored: Vec<usize> = cands.into_iter().take(10).collect();
+
+            for t in truth {
+                total += 1;
+                if raw.contains(&t) {
+                    raw_found += 1;
+                }
+                if rescored.contains(&t) {
+                    resc_found += 1;
+                }
+            }
+        }
+        let raw_recall = raw_found as f64 / total as f64;
+        let rescored_recall = resc_found as f64 / total as f64;
+        println!(
+            "BQ GATE — raw recall@10 {raw_recall:.3}, rescored recall@10 {rescored_recall:.3}, \
+             vector bytes {bq_bytes} vs full {full_bytes} ({:.1}× smaller)",
+            full_bytes as f64 / bq_bytes as f64
+        );
+        // Rescore recovers most of the loss; raw BQ is coarse (reported, loose floor).
+        assert!(
+            rescored_recall >= 0.90,
+            "BQ + rescore recall@10 = {rescored_recall:.3}, gate is 0.90"
+        );
+        assert!(
+            raw_recall >= 0.30,
+            "raw BQ recall@10 = {raw_recall:.3} — should still be well above random"
         );
     }
 
@@ -1340,7 +1514,7 @@ mod tests {
     #[test]
     fn quantized_round_trips_and_store_tag_guards_config() {
         let mut idx = AnnIndex::new(AnnConfig {
-            quantized: true,
+            quantizer: Quantizer::Sq8,
             ..AnnConfig::default()
         });
         for i in 0..500 {
@@ -1352,7 +1526,7 @@ mod tests {
         let back = AnnIndex::from_bytes(
             &bytes,
             AnnConfig {
-                quantized: true,
+                quantizer: Quantizer::Sq8,
                 ..AnnConfig::default()
             },
         )

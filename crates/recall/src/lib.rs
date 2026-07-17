@@ -13,7 +13,7 @@ mod ann;
 mod flat;
 pub mod quant;
 
-pub use ann::{AnnConfig, AnnIndex};
+pub use ann::{AnnConfig, AnnIndex, Quantizer};
 pub use flat::FlatRecall;
 
 /// Re-export so downstream crates can name the trait without a second dep.

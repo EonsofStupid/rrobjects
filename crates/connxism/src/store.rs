@@ -56,10 +56,11 @@ pub struct ConnXRecall {
     analyzer: Arc<rro_core::text::Analyzer>,
     writer: Arc<Mutex<()>>,
     params: Bm25Params,
-    /// Rescore graph hits exactly from the durable vectors (set when the
-    /// graph stores quantized codes — scores must never be approximate at
-    /// the API surface without saying so; here we simply make them exact).
-    rescore: bool,
+    /// How the graph quantizes its vectors. Lossy modes rescore graph hits
+    /// exactly from the durable vectors (scores must never be approximate at the
+    /// API surface without saying so), and BQ additionally over-fetches wider —
+    /// its 1-bit codes surface fewer true neighbours per candidate.
+    quantizer: recall::Quantizer,
 }
 
 impl Estate {
@@ -75,7 +76,7 @@ impl Estate {
             analyzer: Arc::new(self.info().analyzer.clone()),
             writer: Arc::new(Mutex::new(())),
             params: Bm25Params::default(),
-            rescore: self.quantized,
+            quantizer: self.quantizer,
         }
     }
 }
@@ -114,11 +115,11 @@ impl ConnXRecall {
         let q = query.clone();
         let terms = self.analyzer.analyze(query_text);
         let depth = top_k.saturating_mul(FUSION_DEPTH_FACTOR).max(top_k);
-        let rescore = self.rescore;
+        let quantizer = self.quantizer;
 
         tokio::task::spawn_blocking(move || {
             // Two rankings over the same estate…
-            let dense = dense_blocking(&db, &ann, &pending, &q, depth, false, rescore)?;
+            let dense = dense_blocking(&db, &ann, &pending, &q, depth, false, quantizer)?;
             let lexical = if terms.is_empty() {
                 Vec::new()
             } else {
@@ -641,9 +642,9 @@ impl Recall for ConnXRecall {
         let ann = self.ann.clone();
         let pending = self.pending.clone();
         let q = query.clone();
-        let rescore = self.rescore;
+        let quantizer = self.quantizer;
         tokio::task::spawn_blocking(move || {
-            dense_blocking(&db, &ann, &pending, &q, top_k, true, rescore)
+            dense_blocking(&db, &ann, &pending, &q, top_k, true, quantizer)
         })
         .await
         .map_err(|e| RroError::Recall(format!("join: {e}")))?
@@ -1020,21 +1021,28 @@ fn dense_blocking(
     query: &Embedding,
     top_k: usize,
     fetch_payload: bool,
-    rescore: bool,
+    quantizer: recall::Quantizer,
 ) -> Result<Vec<Candidate>> {
-    // Quantized graphs return approximate scores; over-fetch, then rescore
-    // the candidates exactly from the durable vectors before cutting to k.
-    let fetch = if rescore {
-        top_k.saturating_mul(2)
-    } else {
-        top_k
+    use recall::Quantizer;
+    // Lossy graphs return approximate scores; over-fetch, then rescore the
+    // candidates exactly from the durable vectors before cutting to k. BQ is
+    // far coarser than SQ8 (1 bit vs 1 byte per dim), so it over-fetches wider
+    // and widens `ef` too — otherwise its top-k misses too many true neighbours
+    // for rescore to recover them. (Measured: at `×2`/`ef 64` BQ recall@10 is
+    // ~0.64; at `×8`/`ef 200` it clears the estate gate.)
+    let rescore = quantizer.is_lossy();
+    let (factor, ef_floor) = match quantizer {
+        Quantizer::None => (1, 64),
+        Quantizer::Sq8 => (2, 64),
+        Quantizer::Bq => (8, 200),
     };
+    let fetch = top_k.saturating_mul(factor);
     let mut scored: Vec<(String, f32)>;
     {
         let graph = ann.read().expect("ann lock");
         if graph.len() >= ANN_MIN_CORPUS {
             scored = graph
-                .search(query, fetch, fetch.max(64))
+                .search(query, fetch, fetch.max(ef_floor))
                 .into_iter()
                 .map(|(id, score)| (id.as_str().to_string(), score))
                 .collect();

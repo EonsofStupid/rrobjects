@@ -30,6 +30,7 @@ mod strategies;
 mod txn;
 
 pub use estate::{Estate, EstateConfig, FeedStats, HealthReport, Issue, Quotas};
+pub use recall::Quantizer;
 
 /// How many column families one estate manages (ops surface sizing).
 pub const COLUMN_FAMILY_COUNT: usize = keys::COLUMN_FAMILIES.len();

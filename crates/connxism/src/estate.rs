@@ -10,7 +10,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 
-use recall::{AnnConfig, AnnIndex};
+use recall::{AnnConfig, AnnIndex, Quantizer};
 use rocksdb::{ColumnFamily, Options, DB};
 use rro_core::{Embedding, Id, Result, RroError};
 
@@ -142,11 +142,11 @@ impl Quotas {
 /// Open-time choices for an estate.
 #[derive(Debug, Clone)]
 pub struct EstateConfig {
-    /// Hold the ANN graph's vectors as SQ8 codes (~4× smaller memory).
-    /// Search results are **rescored exactly** from the durable vector
-    /// column family, so scores at the API stay exact — quantization is a
-    /// memory decision, not an accuracy decision.
-    pub quantized: bool,
+    /// How the ANN graph stores its vectors: `None` (full f32), `Sq8` (~4×
+    /// smaller), or `Bq` (~32× smaller). Lossy modes are **rescored exactly**
+    /// from the durable vector column family, so scores at the API stay exact —
+    /// quantization is a memory/IO decision, not an accuracy one.
+    pub quantizer: Quantizer,
     /// The text analyzer for the lexical (BM25) index. **Fixed at estate
     /// creation** — it is part of the index's identity (postings and
     /// queries must agree on what a token is); reopening ignores this
@@ -188,7 +188,7 @@ pub struct EstateConfig {
 impl Default for EstateConfig {
     fn default() -> Self {
         EstateConfig {
-            quantized: false,
+            quantizer: Quantizer::None,
             analyzer: rro_core::text::Analyzer::default(),
             fsync_writes: false,
             quotas: Quotas::default(),
@@ -221,8 +221,9 @@ pub struct Estate {
     pub(crate) ann: Arc<StdRwLock<AnnIndex>>,
     /// Not-yet-applied graph ops + the applier's signaling.
     pub(crate) pending: Arc<crate::pending::Pending>,
-    /// Whether the graph stores SQ8 codes (search paths rescore exactly).
-    pub(crate) quantized: bool,
+    /// How the graph stores its vectors. Lossy modes drive exact rescore, and BQ
+    /// drives a wider over-fetch (its coarse codes need more candidates).
+    pub(crate) quantizer: Quantizer,
     /// Fired after every committed changefeed append (upsert/remove), so
     /// push-stream watchers wake event-driven instead of polling.
     pub(crate) feed_notify: Arc<tokio::sync::Notify>,
@@ -422,7 +423,7 @@ impl Estate {
         // and a stale or corrupt cache can never serve wrong results.
         let vectors_path = path.as_ref().join("graph.vectors");
         let ann_config = AnnConfig {
-            quantized: config.quantized,
+            quantizer: config.quantizer,
             ..AnnConfig::default()
         };
         let (ann, graph_loaded) = match Self::load_persisted_graph(
@@ -471,7 +472,7 @@ impl Estate {
             db,
             ann,
             pending,
-            quantized: config.quantized,
+            quantizer: config.quantizer,
             feed_notify: Arc::new(tokio::sync::Notify::new()),
             quotas: config.quotas.clone(),
             lexical_stats,
@@ -1079,7 +1080,7 @@ impl Estate {
             collections: self.collections()?,
             dim: info.dim,
             named_dims: info.named_dims,
-            quantized: self.quantized,
+            quantized: self.quantizer.is_lossy(),
             cf_bytes: self.cf_sizes()?,
             quotas: self.quotas.clone(),
         })

@@ -8,7 +8,7 @@
 //! this reason — recall pages through an owned buffer cache instead. That keeps
 //! the whole engine `#![forbid(unsafe_code)]`.
 
-use recall::{AnnConfig, AnnIndex};
+use recall::{AnnConfig, AnnIndex, Quantizer};
 use rro_core::{Embedding, Id};
 
 fn pseudo_vec(seed: u64, dim: usize) -> Embedding {
@@ -101,7 +101,7 @@ fn paged_search_is_identical_and_ram_is_bounded() {
 #[test]
 fn paged_quantized_round_trips() {
     let config = AnnConfig {
-        quantized: true,
+        quantizer: Quantizer::Sq8,
         ..AnnConfig::default()
     };
     let idx = build(1500, 32, config.clone());
@@ -169,7 +169,7 @@ fn from_paged_rejects_mismatched_sidecar() {
         100,
         16,
         AnnConfig {
-            quantized: true,
+            quantizer: Quantizer::Sq8,
             ..AnnConfig::default()
         },
     );
