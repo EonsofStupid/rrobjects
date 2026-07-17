@@ -445,6 +445,23 @@ impl Handler for FlowNode {
                 Ok(Some(msg.reply(serde_json::json!({ "total": total }))))
             }
 
+            // `graphql`: the GraphQL query surface, over the a2a transport.
+            // Body: {"query": "{ search(query: \"x\", topK: 3) { id score } }"}.
+            // GraphQL is a query language, not a transport — so it rides this
+            // NDJSON connection with every other verb rather than a bolted-on
+            // HTTP server. Reply is the standard GraphQL envelope: {data} or
+            // {data, errors}. Read-side only (writes go through `tx`/`sql`).
+            "graphql" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let query = msg.body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let result = crate::graphql::execute(query, estate, &self.flow).await;
+                Ok(Some(msg.reply(result)))
+            }
+
             // `tx`: a sequence of writes applied as ONE atomic transaction.
             // Body: {"ops": [{"upsert": [<doc>, …]}, {"remove": "<id>"}, …]}.
             // Commits all or none — any failure (a bad op, a dim mismatch)

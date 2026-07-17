@@ -134,9 +134,9 @@ pub struct Select {
 
 /// `DEFINE INDEX ON <field>` — a payload index.
 ///
-/// Only the subject the engine actually has. SurrealDB has 17 DEFINE subjects;
-/// promising `DEFINE TABLE`/`FIELD`/`EVENT` before schemas exist (Phase C4)
-/// would be a language writing cheques the engine cannot cash.
+/// Only the subjects the engine actually has. Promising `DEFINE TABLE`/`FIELD`/
+/// `EVENT` before schemas exist (Phase 10) would be a language writing cheques
+/// the engine cannot cash.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Define {
     /// `DEFINE INDEX ON <field>` → `create_payload_index`.
@@ -232,8 +232,8 @@ pub struct Traverse {
     pub limit: Option<usize>,
 }
 
-/// `LIVE [SINCE n]` — the push changefeed. `LIVE` is SurrealDB's spelling;
-/// this engine calls the same capability `watch`.
+/// `LIVE [SINCE n]` — the push changefeed. `LIVE` is the familiar keyword for a
+/// live subscription; in RRO the capability is `watch`, which this routes to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Live {
     /// Resume from this feed sequence (`SINCE`), or from now.

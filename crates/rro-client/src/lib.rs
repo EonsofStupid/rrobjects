@@ -116,6 +116,16 @@ impl Client {
             .ok_or_else(|| RroError::Net("tx reply missing `committed`".into()))
     }
 
+    /// Run a GraphQL query against the node — over the a2a transport, not HTTP.
+    ///
+    /// Returns the GraphQL response envelope (`{data}` or `{data, errors}`).
+    /// GraphQL is a query language, not a transport, so this rides the same
+    /// connection as every other verb.
+    pub async fn graphql(&self, query: &str) -> Result<serde_json::Value> {
+        self.call("graphql", serde_json::json!({ "query": query }))
+            .await
+    }
+
     /// Page the node's durable changefeed from `since_seq`.
     pub async fn changes(&self, since_seq: u64, limit: usize) -> Result<ChangesPage> {
         let body = self

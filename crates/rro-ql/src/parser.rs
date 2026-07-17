@@ -160,9 +160,9 @@ impl Parser {
 
     /// `RELATE <from> -> <verb> -> <to>`
     ///
-    /// The arrow spelling is SurrealDB's, because it is the one people know for
-    /// "assert an edge" — and this engine's `relate(from, verb, to)` is exactly
-    /// that shape.
+    /// The `->` arrow is the conventional graph-edge spelling — it reads as
+    /// "assert an edge" — and RRO's `relate(from, verb, to)` over the connectome
+    /// is exactly that shape.
     fn relate(&mut self) -> Result<Relate, QlError> {
         let from = self.record_id()?;
         self.expect(&TokenKind::ArrowOut)?;
@@ -253,9 +253,9 @@ impl Parser {
                 collection: self.ident()?,
             });
         }
-        // Deliberately narrow. SurrealDB has 17 DEFINE subjects; this engine has
-        // payload indexes and aliases. Accepting `DEFINE TABLE` here and ignoring
-        // it would be the language lying about the engine.
+        // Deliberately narrow: RRQL defines exactly what the engine has — payload
+        // indexes and aliases — and nothing else. Accepting `DEFINE TABLE` here
+        // and ignoring it would be the language lying about the engine.
         Err(QlError::new(
             format!(
                 "DEFINE supports INDEX and ALIAS, found {}. (TABLE/FIELD/EVENT need \
@@ -547,9 +547,10 @@ mod tests {
         );
     }
 
-    /// The engine has payload indexes and aliases. SurrealDB has 17 DEFINE
-    /// subjects. Accepting `DEFINE TABLE` and ignoring it would be the language
-    /// lying about the engine — so it must be refused, and the refusal must say
+    /// RRO has payload indexes and aliases, so those are the only `DEFINE`
+    /// subjects RRQL accepts. Accepting `DEFINE TABLE` and ignoring it would be
+    /// the language lying about the engine — so it must be refused, and the
+    /// refusal must say
     /// why.
     #[test]
     fn define_table_is_refused_and_says_why() {

@@ -10,6 +10,7 @@
 //!   must_not over eq/any/range/exists), score threshold, lean payload.
 //! - `rro_index`   — ingest documents.
 //! - `rro_tx`      — a sequence of upserts/removes applied as one atomic transaction.
+//! - `rro_graphql` — a GraphQL query over the a2a transport (client picks the shape).
 //! - `rro_changes` — page the durable changefeed.
 //!
 //! MCP client config (e.g. Claude-family desktop/CLI):
@@ -96,6 +97,15 @@ fn tool_list() -> serde_json::Value {
                 "type": "object",
                 "properties": { "ops": { "type": "array", "items": { "type": "object" } } },
                 "required": ["ops"]
+            }
+        },
+        {
+            "name": "rro_graphql",
+            "description": "Run a GraphQL query over the node (a2a transport, not HTTP). Schema: Query { health, collections { name count }, document(id) { id text metadata }, search(query, topK, mode) { id score text metadata } }. The client picks the response shape.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
             }
         },
         {
@@ -204,6 +214,10 @@ async fn call_tool(client: &Client, name: &str, args: &serde_json::Value) -> ser
                 .await
                 .map(|n| serde_json::json!({ "committed": n }))
                 .map_err(|e| e.to_string())
+        }
+        "rro_graphql" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            client.graphql(query).await.map_err(|e| e.to_string())
         }
         "rro_changes" => {
             let since = args.get("since_seq").and_then(|v| v.as_u64()).unwrap_or(0);

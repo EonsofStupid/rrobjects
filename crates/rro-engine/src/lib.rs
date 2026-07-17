@@ -21,6 +21,7 @@
 
 mod estate_map;
 mod flow;
+pub mod graphql;
 mod handler;
 mod ingest;
 pub mod ops;
