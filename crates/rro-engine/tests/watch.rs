@@ -126,6 +126,67 @@ async fn push_stream_sees_live_changes_and_resumes_by_seq() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn live_statement_opens_a_delivering_subscription() {
+    // Phase 10: the RRQL `LIVE` statement — refused as a one-shot value — opens
+    // the push stream. `LIVE` (no SINCE) streams only changes after subscription;
+    // `LIVE SINCE 0` replays history. Both must deliver.
+    let dir = tempfile::tempdir().unwrap();
+    let estate = Arc::new(connxism::Estate::open(dir.path(), "live").unwrap());
+    let recall = estate.recall();
+    recall.upsert(vec![rec("h1", 0.1)]).await.unwrap(); // history
+
+    let addr = watch_node(estate.clone(), None).await;
+    let client = Client::new(addr.to_string());
+
+    // `LIVE` streams from *now* — history is not replayed, the fresh write is.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .live("LIVE", move |c| {
+                    let _ = tx.send(c);
+                    false // one frame is enough
+                })
+                .await
+        });
+    }
+    // Give the subscription a moment to arm, then write.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    recall.upsert(vec![rec("l1", 0.3)]).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("LIVE frame within 5s")
+        .expect("channel open");
+    assert_eq!(
+        frame["doc_id"], "l1",
+        "LIVE must deliver the post-subscribe write"
+    );
+
+    // `LIVE SINCE 0` replays the whole feed from the start.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .live("LIVE SINCE 0", move |c| {
+                    let _ = tx.send(c);
+                    false
+                })
+                .await
+        });
+    }
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("LIVE SINCE frame within 5s")
+        .expect("channel open");
+    assert_eq!(
+        first["doc_id"], "h1",
+        "LIVE SINCE 0 replays history from the start"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn watch_is_token_gated() {
     let dir = tempfile::tempdir().unwrap();
     let estate = Arc::new(connxism::Estate::open(dir.path(), "wt").unwrap());

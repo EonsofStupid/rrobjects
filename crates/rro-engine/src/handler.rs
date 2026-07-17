@@ -690,14 +690,17 @@ impl Handler for FlowNode {
         msg: Message,
         tx: tokio::sync::mpsc::Sender<Message>,
     ) -> Result<bool> {
-        if msg.verb != "watch" {
+        // `watch` is the raw subscription; `live` is the RRQL `LIVE` statement,
+        // which opens the same push stream — `LIVE [SINCE n]` maps to the feed
+        // cursor (no SINCE ⇒ from now, only future changes).
+        if msg.verb != "watch" && msg.verb != "live" {
             return Ok(false);
         }
         if let Some(required) = &self.token {
             if msg.token.as_deref() != Some(required.as_str()) {
                 rro_core::events::emit(
                     "a2a.unauthorized",
-                    serde_json::json!({ "verb": "watch", "from": msg.from.as_str() }),
+                    serde_json::json!({ "verb": msg.verb, "from": msg.from.as_str() }),
                 );
                 let _ = tx
                     .send(msg.reply(serde_json::json!({ "error": "unauthorized" })))
@@ -712,11 +715,40 @@ impl Handler for FlowNode {
             return Ok(true);
         };
 
-        let mut since = msg
-            .body
-            .get("since_seq")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        // Resolve the resume cursor. For `live`, parse the LIVE statement: SINCE n
+        // resumes from n, no SINCE streams only changes after subscription.
+        let mut since = if msg.verb == "live" {
+            let src = msg
+                .body
+                .get("sql")
+                .and_then(|v| v.as_str())
+                .unwrap_or("LIVE");
+            match rro_ql::parse(src) {
+                Ok(rro_ql::Statement::Live(live)) => match live.since {
+                    Some(n) => n,
+                    None => estate.feed_stats().map(|s| s.next_seq).unwrap_or(0),
+                },
+                Ok(other) => {
+                    let _ = tx
+                        .send(msg.reply(serde_json::json!({
+                            "error": format!("`live` needs a LIVE statement, got {}", other.keyword())
+                        })))
+                        .await;
+                    return Ok(true);
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(msg.reply(serde_json::json!({ "error": e.to_string() })))
+                        .await;
+                    return Ok(true);
+                }
+            }
+        } else {
+            msg.body
+                .get("since_seq")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        };
         let signal = estate.feed_signal();
 
         tokio::spawn(async move {
