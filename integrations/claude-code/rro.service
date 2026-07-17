@@ -1,0 +1,25 @@
+[Unit]
+Description=RRO — Reason Ready Objects: clyffy's recall spine (the dogfood node)
+Documentation=https://github.com/EonsofStupid/rrobjects
+# The embedder lives in llama.cpp on :8090. RRO does not manage it; if it is
+# down, recall degrades rather than fails, and the hook exits 0 either way.
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=RRO_LISTEN=127.0.0.1:7878
+Environment=RRO_ESTATE=%h/.local/share/rro/estate
+Environment=RRO_EVENTS=%h/.local/share/rro/events.jsonl
+Environment=RRO_EMBEDDER=llamacpp
+Environment=RRO_EMBEDDER_ENDPOINT=http://127.0.0.1:8090
+# identity, NOT the default lexical reranker: BM25 re-sorting a hybrid ranking
+# double-counts the lexical signal and sinks the semantically correct answer to
+# 0.0000. See docs/BENCHMARKS_REAL.md Finding 4.
+Environment=RRO_RERANKER=identity
+Environment=RRO_NODE=rro
+ExecStart=%h/Projects/rrobjects/target/release/rro
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
