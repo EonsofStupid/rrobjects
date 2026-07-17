@@ -12,12 +12,19 @@ publish.workspace = true
 [dependencies]
 rro-core = { workspace = true }
 async-trait = { workspace = true }
+# mmap-backed vector storage: cold vectors page from a memory-mapped file via the
+# OS page cache instead of bounding RAM. `bytemuck` reinterprets the mapped bytes
+# as `f32` (page-aligned base, so the cast is sound). Neither is a storage-engine
+# dependency — recall stays a pure compute crate.
+memmap2 = { workspace = true }
+bytemuck = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 proptest = { workspace = true }
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "search"

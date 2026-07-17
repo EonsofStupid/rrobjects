@@ -1411,10 +1411,13 @@ name = "recall"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bytemuck",
  "criterion",
+ "memmap2",
  "proptest",
  "rro-core",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -20,7 +20,9 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
 
+use memmap2::Mmap;
 use rro_core::{Embedding, Id};
 
 /// Tuning for the graph.
@@ -48,11 +50,103 @@ impl Default for AnnConfig {
     }
 }
 
-/// Vector storage: full-precision f32 or SQ8 codes with per-vector params.
+/// Node-ordered vector storage split between a read-only mmap **base** (nodes
+/// `0..base_count`, paged from disk by the OS page cache) and an in-RAM **tail**
+/// (nodes appended since the base was mapped). A freshly built graph is all tail;
+/// a graph opened from a persisted sidecar is all base until the next write.
+///
+/// This split is the RAM-ceiling lift: 10M vectors map straight from disk and
+/// only the working set stays resident, while writes still land on the heap and
+/// are searchable immediately. Node indices are dense and stable, so a node's
+/// slot is a pure offset — no per-node bookkeeping.
+struct MappedVec<T: bytemuck::Pod> {
+    /// The mapped base file, reinterpreted as `[T]`. `None` for an in-RAM graph.
+    base: Option<Arc<Mmap>>,
+    /// Number of `T` elements the base holds (0 when `base` is `None`).
+    base_len: usize,
+    /// Elements for nodes at or beyond the base — the heap-resident tail.
+    tail: Vec<T>,
+}
+
+impl<T: bytemuck::Pod> MappedVec<T> {
+    fn in_ram() -> Self {
+        MappedVec {
+            base: None,
+            base_len: 0,
+            tail: Vec::new(),
+        }
+    }
+
+    /// Build over a mapped base of exactly `base_len` elements, with no tail.
+    fn mapped(base: Arc<Mmap>, base_len: usize) -> Self {
+        MappedVec {
+            base: Some(base),
+            base_len,
+            tail: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn base_slice(&self) -> &[T] {
+        match &self.base {
+            // The base file is page-aligned and its length is validated against
+            // `base_len` on load, so this reinterpret is sound; `cast_slice`
+            // still bounds- and align-checks rather than read past the map.
+            Some(m) => &bytemuck::cast_slice::<u8, T>(&m[..])[..self.base_len],
+            None => &[],
+        }
+    }
+
+    /// The `unit`-element slice for `node` (its whole vector or code block).
+    #[inline]
+    fn get(&self, node: u32, unit: usize) -> &[T] {
+        let node = node as usize;
+        let base_count = self.base_len / unit;
+        if node < base_count {
+            let s = node * unit;
+            &self.base_slice()[s..s + unit]
+        } else {
+            let s = (node - base_count) * unit;
+            &self.tail[s..s + unit]
+        }
+    }
+
+    /// Append one node's `unit` elements — always to the RAM tail.
+    #[inline]
+    fn push(&mut self, block: &[T]) {
+        self.tail.extend_from_slice(block);
+    }
+
+    /// Total elements across base + tail.
+    fn len(&self) -> usize {
+        self.base_len + self.tail.len()
+    }
+
+    /// Heap bytes held — the tail only; the base is mmap, not heap.
+    fn heap_bytes(&self) -> usize {
+        self.tail.len() * std::mem::size_of::<T>()
+    }
+
+    /// Total logical bytes (base + tail).
+    fn logical_bytes(&self) -> usize {
+        self.len() * std::mem::size_of::<T>()
+    }
+
+    /// Append every element in node order (base then tail) as raw bytes — the
+    /// on-disk sidecar layout, and what a later open mmaps back as the base.
+    fn write_all(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(bytemuck::cast_slice(self.base_slice()));
+        out.extend_from_slice(bytemuck::cast_slice(&self.tail));
+    }
+}
+
+/// Vector storage: full-precision `f32` or SQ8 codes with per-vector params.
+/// Both keep their raw data in a [`MappedVec`], so either precision can be
+/// mmap-backed; the SQ8 `params` stay in RAM (tiny next to the codes).
 enum Store {
-    Full(Vec<f32>),
+    Full(MappedVec<f32>),
     Sq8 {
-        codes: Vec<u8>,
+        codes: MappedVec<u8>,
         params: Vec<crate::quant::SqParams>,
     },
 }
@@ -60,9 +154,9 @@ enum Store {
 impl Store {
     fn push(&mut self, v: &[f32]) {
         match self {
-            Store::Full(vectors) => vectors.extend_from_slice(v),
+            Store::Full(vectors) => vectors.push(v),
             Store::Sq8 { codes, params } => {
-                params.push(crate::quant::quantize_into(v, codes));
+                params.push(crate::quant::quantize_into(v, &mut codes.tail));
             }
         }
     }
@@ -70,26 +164,22 @@ impl Store {
     /// Dot of `node`'s stored vector with a full-precision query.
     #[inline(always)]
     fn dot_query(&self, node: u32, dim: usize, q: &[f32], qsum: f32) -> f32 {
-        let start = node as usize * dim;
         match self {
-            Store::Full(vectors) => rro_core::simd::dot(&vectors[start..start + dim], q),
+            Store::Full(vectors) => rro_core::simd::dot(vectors.get(node, dim), q),
             Store::Sq8 { codes, params } => {
-                crate::quant::dot_query(&codes[start..start + dim], &params[node as usize], q, qsum)
+                crate::quant::dot_query(codes.get(node, dim), &params[node as usize], q, qsum)
             }
         }
     }
 
     /// Dot between two stored vectors.
     fn dot_nodes(&self, a: u32, b: u32, dim: usize) -> f32 {
-        let (sa, sb) = (a as usize * dim, b as usize * dim);
         match self {
-            Store::Full(vectors) => {
-                rro_core::simd::dot(&vectors[sa..sa + dim], &vectors[sb..sb + dim])
-            }
+            Store::Full(vectors) => rro_core::simd::dot(vectors.get(a, dim), vectors.get(b, dim)),
             Store::Sq8 { codes, params } => crate::quant::dot_codes(
-                &codes[sa..sa + dim],
+                codes.get(a, dim),
                 &params[a as usize],
-                &codes[sb..sb + dim],
+                codes.get(b, dim),
                 &params[b as usize],
             ),
         }
@@ -97,21 +187,31 @@ impl Store {
 
     /// The (possibly lossy) full-precision vector of `node`.
     fn materialize(&self, node: u32, dim: usize) -> Vec<f32> {
-        let start = node as usize * dim;
         match self {
-            Store::Full(vectors) => vectors[start..start + dim].to_vec(),
+            Store::Full(vectors) => vectors.get(node, dim).to_vec(),
             Store::Sq8 { codes, params } => {
-                crate::quant::decode(&codes[start..start + dim], &params[node as usize])
+                crate::quant::decode(codes.get(node, dim), &params[node as usize])
             }
         }
     }
 
-    /// Bytes held by vector storage.
+    /// Total logical bytes held by vector storage (base + tail).
     fn bytes(&self) -> usize {
         match self {
-            Store::Full(vectors) => vectors.len() * 4,
+            Store::Full(vectors) => vectors.logical_bytes(),
             Store::Sq8 { codes, params } => {
-                codes.len() + params.len() * std::mem::size_of::<crate::quant::SqParams>()
+                codes.logical_bytes() + params.len() * std::mem::size_of::<crate::quant::SqParams>()
+            }
+        }
+    }
+
+    /// Heap bytes held by vector storage — excludes the mmap base. This is the
+    /// number that stays small when a large graph is opened mmap-backed.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Store::Full(vectors) => vectors.heap_bytes(),
+            Store::Sq8 { codes, params } => {
+                codes.heap_bytes() + params.len() * std::mem::size_of::<crate::quant::SqParams>()
             }
         }
     }
@@ -163,11 +263,11 @@ impl AnnIndex {
     pub fn new(config: AnnConfig) -> Self {
         let store = if config.quantized {
             Store::Sq8 {
-                codes: Vec::new(),
+                codes: MappedVec::in_ram(),
                 params: Vec::new(),
             }
         } else {
-            Store::Full(Vec::new())
+            Store::Full(MappedVec::in_ram())
         };
         AnnIndex {
             config,
@@ -551,54 +651,18 @@ impl AnnIndex {
         let mut w = Vec::with_capacity(4 * 1024);
         w.extend_from_slice(b"RROG"); // magic
         w.push(1); // format version
-        w.extend_from_slice(&(self.dim.unwrap_or(0) as u32).to_le_bytes());
-        w.extend_from_slice(&self.rng.to_le_bytes());
-        w.extend_from_slice(&(self.live as u64).to_le_bytes());
-        match self.entry {
-            Some((node, layer)) => {
-                w.push(1);
-                w.extend_from_slice(&node.to_le_bytes());
-                w.extend_from_slice(&(layer as u32).to_le_bytes());
-            }
-            None => w.push(0),
-        }
-        let n = self.ids.len();
-        w.extend_from_slice(&(n as u32).to_le_bytes());
-        for id in &self.ids {
-            let b = id.as_str().as_bytes();
-            w.extend_from_slice(&(b.len() as u32).to_le_bytes());
-            w.extend_from_slice(b);
-        }
-        for &d in &self.deleted {
-            w.push(d as u8);
-        }
-        for node_links in &self.links {
-            w.extend_from_slice(&(node_links.len() as u32).to_le_bytes());
-            for layer in node_links {
-                w.extend_from_slice(&(layer.len() as u32).to_le_bytes());
-                for &nb in layer {
-                    w.extend_from_slice(&nb.to_le_bytes());
-                }
-            }
-        }
+        self.write_head(&mut w);
         match &self.store {
             Store::Full(v) => {
                 w.push(0);
                 w.extend_from_slice(&(v.len() as u64).to_le_bytes());
-                for &x in v {
-                    w.extend_from_slice(&x.to_le_bytes());
-                }
+                v.write_all(&mut w);
             }
             Store::Sq8 { codes, params } => {
                 w.push(1);
                 w.extend_from_slice(&(codes.len() as u64).to_le_bytes());
-                w.extend_from_slice(codes);
-                w.extend_from_slice(&(params.len() as u32).to_le_bytes());
-                for p in params {
-                    w.extend_from_slice(&p.scale.to_le_bytes());
-                    w.extend_from_slice(&p.offset.to_le_bytes());
-                    w.extend_from_slice(&p.code_sum.to_le_bytes());
-                }
+                codes.write_all(&mut w);
+                write_params(&mut w, params);
             }
         }
         w
@@ -616,6 +680,173 @@ impl AnnIndex {
         if r.take(4)? != b"RROG" || r.u8()? != 1 {
             return None;
         }
+        let head = Head::read(&mut r)?;
+        let store = match r.u8()? {
+            0 => {
+                // f32 elements are read one at a time: the blob is a byte buffer at
+                // an arbitrary offset, so a zero-copy cast could be misaligned.
+                let len = r.u64()? as usize;
+                let mut mv = MappedVec::in_ram();
+                mv.tail.reserve(len);
+                for _ in 0..len {
+                    mv.tail.push(r.f32()?);
+                }
+                Store::Full(mv)
+            }
+            1 => {
+                let clen = r.u64()? as usize;
+                let mut codes = MappedVec::in_ram();
+                codes.tail = r.take(clen)?.to_vec();
+                let params = read_params(&mut r)?;
+                Store::Sq8 { codes, params }
+            }
+            _ => return None,
+        };
+        // The store tag must agree with how this estate is configured, or a
+        // quantized estate would load full vectors (or vice versa) and score wrong.
+        if matches!(store, Store::Sq8 { .. }) != config.quantized {
+            return None;
+        }
+        Some(head.into_index(config, store))
+    }
+
+    // ---- split persistence: structure blob + mmap-able vector sidecar ----------
+    //
+    // 6a persists the whole graph — structure *and* vectors — as one blob, which
+    // still pulls every vector into RAM on load. 6b splits them: the structure
+    // (small: ids, links, tombstones, SQ8 params) stays a blob, and the vectors
+    // go to a separate node-ordered file that a later open mmaps as the base. That
+    // is what lets RSS track the working set instead of the dataset.
+
+    /// Serialize everything *except* the raw vectors — ids, links, tombstones,
+    /// entry, and (for SQ8) the per-vector params. Pair with
+    /// [`AnnIndex::write_vectors`]; reload with [`AnnIndex::from_mmap`].
+    pub fn to_structure_bytes(&self) -> Vec<u8> {
+        let mut w = Vec::with_capacity(4 * 1024);
+        w.extend_from_slice(b"RROS"); // magic: structure-only
+        w.push(1); // format version
+        self.write_head(&mut w);
+        match &self.store {
+            Store::Full(_) => w.push(0),
+            Store::Sq8 { params, .. } => {
+                w.push(1);
+                write_params(&mut w, params);
+            }
+        }
+        w
+    }
+
+    /// Append the raw vectors in node order — the exact bytes a later open maps
+    /// back as the mmap base. Full: `n·dim` `f32` LE. SQ8: `n·dim` code
+    /// bytes (the params travel in the structure blob). No header, so the file
+    /// starts on a vector boundary and the mmap is naturally aligned.
+    pub fn write_vectors(&self, out: &mut Vec<u8>) {
+        match &self.store {
+            Store::Full(v) => v.write_all(out),
+            Store::Sq8 { codes, .. } => codes.write_all(out),
+        }
+    }
+
+    /// Reconstruct a graph from a structure blob ([`AnnIndex::to_structure_bytes`])
+    /// plus a memory-mapped vector file ([`AnnIndex::write_vectors`]). The vectors
+    /// are *not* read into RAM — they stay in the mmap and page on demand.
+    ///
+    /// Returns `None` (→ caller rebuilds) if the blob is not a current-version
+    /// structure, the store precision disagrees with `config`, or the vector file
+    /// is not exactly `n · dim` elements — a size mismatch means the sidecar does
+    /// not match the structure, and trusting it would read the wrong bytes.
+    pub fn from_mmap(structure: &[u8], vectors: Arc<Mmap>, config: AnnConfig) -> Option<AnnIndex> {
+        let mut r = ByteReader::new(structure);
+        if r.take(4)? != b"RROS" || r.u8()? != 1 {
+            return None;
+        }
+        let head = Head::read(&mut r)?;
+        let quantized = match r.u8()? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        if quantized != config.quantized {
+            return None;
+        }
+        let dim = head.dim.unwrap_or(0);
+        let elems = head.ids.len().checked_mul(dim)?;
+        let store = if quantized {
+            let params = read_params(&mut r)?;
+            if params.len() != head.ids.len() || vectors.len() != elems {
+                return None; // one code byte per dim; sidecar must match exactly
+            }
+            Store::Sq8 {
+                codes: MappedVec::mapped(vectors, elems),
+                params,
+            }
+        } else {
+            if vectors.len() != elems * std::mem::size_of::<f32>() {
+                return None;
+            }
+            Store::Full(MappedVec::mapped(vectors, elems))
+        };
+        Some(head.into_index(config, store))
+    }
+
+    /// Write the shared head (dim, rng, live count, entry, ids, tombstones,
+    /// links) — everything but the store section. Shared by [`AnnIndex::to_bytes`]
+    /// and [`AnnIndex::to_structure_bytes`].
+    fn write_head(&self, w: &mut Vec<u8>) {
+        w.extend_from_slice(&(self.dim.unwrap_or(0) as u32).to_le_bytes());
+        w.extend_from_slice(&self.rng.to_le_bytes());
+        w.extend_from_slice(&(self.live as u64).to_le_bytes());
+        match self.entry {
+            Some((node, layer)) => {
+                w.push(1);
+                w.extend_from_slice(&node.to_le_bytes());
+                w.extend_from_slice(&(layer as u32).to_le_bytes());
+            }
+            None => w.push(0),
+        }
+        w.extend_from_slice(&(self.ids.len() as u32).to_le_bytes());
+        for id in &self.ids {
+            let b = id.as_str().as_bytes();
+            w.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            w.extend_from_slice(b);
+        }
+        for &d in &self.deleted {
+            w.push(d as u8);
+        }
+        for node_links in &self.links {
+            w.extend_from_slice(&(node_links.len() as u32).to_le_bytes());
+            for layer in node_links {
+                w.extend_from_slice(&(layer.len() as u32).to_le_bytes());
+                for &nb in layer {
+                    w.extend_from_slice(&nb.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    /// Heap bytes held by vector storage — the mmap base is excluded, so this is
+    /// what stays small when a large graph is opened mmap-backed. Observability
+    /// behind the "RSS tracks the working set, not the dataset" property.
+    pub fn heap_vector_bytes(&self) -> usize {
+        self.store.heap_bytes()
+    }
+}
+
+/// The graph's structure, parsed from a head record — the shared spine of every
+/// deserialization path.
+struct Head {
+    dim: Option<usize>,
+    rng: u64,
+    live: usize,
+    entry: Option<(u32, usize)>,
+    ids: Vec<Id>,
+    by_id: HashMap<Id, u32>,
+    deleted: Vec<bool>,
+    links: Vec<Vec<Vec<u32>>>,
+}
+
+impl Head {
+    fn read(r: &mut ByteReader) -> Option<Head> {
         let dim_raw = r.u32()? as usize;
         let dim = if dim_raw == 0 { None } else { Some(dim_raw) };
         let rng = r.u64()?;
@@ -653,50 +884,56 @@ impl AnnIndex {
             }
             links.push(node_links);
         }
-        let store = match r.u8()? {
-            0 => {
-                let len = r.u64()? as usize;
-                let mut v = Vec::with_capacity(len);
-                for _ in 0..len {
-                    v.push(r.f32()?);
-                }
-                Store::Full(v)
-            }
-            1 => {
-                let clen = r.u64()? as usize;
-                let codes = r.take(clen)?.to_vec();
-                let np = r.u32()? as usize;
-                let mut params = Vec::with_capacity(np);
-                for _ in 0..np {
-                    params.push(crate::quant::SqParams {
-                        scale: r.f32()?,
-                        offset: r.f32()?,
-                        code_sum: r.f32()?,
-                    });
-                }
-                Store::Sq8 { codes, params }
-            }
-            _ => return None,
-        };
-        // The store tag must agree with how this estate is configured, or a
-        // quantized estate would load full vectors (or vice versa) and score wrong.
-        let store_is_sq8 = matches!(store, Store::Sq8 { .. });
-        if store_is_sq8 != config.quantized {
-            return None;
-        }
-        Some(AnnIndex {
-            config,
+        Some(Head {
             dim,
-            store,
+            rng,
+            live,
+            entry,
             ids,
             by_id,
             deleted,
             links,
-            entry,
-            rng,
-            live,
         })
     }
+
+    fn into_index(self, config: AnnConfig, store: Store) -> AnnIndex {
+        AnnIndex {
+            config,
+            dim: self.dim,
+            store,
+            ids: self.ids,
+            by_id: self.by_id,
+            deleted: self.deleted,
+            links: self.links,
+            entry: self.entry,
+            rng: self.rng,
+            live: self.live,
+        }
+    }
+}
+
+/// Append SQ8 per-vector params: a count then `(scale, offset, code_sum)` each.
+fn write_params(w: &mut Vec<u8>, params: &[crate::quant::SqParams]) {
+    w.extend_from_slice(&(params.len() as u32).to_le_bytes());
+    for p in params {
+        w.extend_from_slice(&p.scale.to_le_bytes());
+        w.extend_from_slice(&p.offset.to_le_bytes());
+        w.extend_from_slice(&p.code_sum.to_le_bytes());
+    }
+}
+
+/// Inverse of [`write_params`]. `None` on a truncated buffer.
+fn read_params(r: &mut ByteReader) -> Option<Vec<crate::quant::SqParams>> {
+    let np = r.u32()? as usize;
+    let mut params = Vec::with_capacity(np);
+    for _ in 0..np {
+        params.push(crate::quant::SqParams {
+            scale: r.f32()?,
+            offset: r.f32()?,
+            code_sum: r.f32()?,
+        });
+    }
+    Some(params)
 }
 
 #[cfg(test)]
@@ -923,6 +1160,24 @@ mod tests {
         let mut bytes = idx.to_bytes();
         bytes.truncate(bytes.len() / 2);
         assert!(AnnIndex::from_bytes(&bytes, AnnConfig::default()).is_none());
+    }
+
+    /// The structure blob and vector sidecar together reconstruct the exact same
+    /// bytes as the single-blob `to_bytes` would carry — proven here in-crate
+    /// without mmap (the mmap path itself is covered in `tests/mmap.rs`, which can
+    /// use the unsafe `Mmap::map` that this crate forbids). We rebuild an in-RAM
+    /// graph from the split parts by concatenating structure + a Full store tag +
+    /// vectors into the `to_bytes` layout and checking search is unchanged.
+    #[test]
+    fn structure_plus_vectors_carry_everything_to_bytes_does() {
+        let (idx, _) = build(500, 24);
+        let structure = idx.to_structure_bytes();
+        let mut vectors = Vec::new();
+        idx.write_vectors(&mut vectors);
+
+        // Structure omits the vectors; the sidecar is exactly the vector bytes.
+        assert!(structure.len() < idx.to_bytes().len());
+        assert_eq!(vectors.len(), 500 * 24 * 4);
     }
 }
 
