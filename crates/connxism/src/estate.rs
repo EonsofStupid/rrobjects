@@ -214,6 +214,13 @@ pub struct Estate {
     pub(crate) quotas: Quotas,
     /// Whether df stats are maintained (drives write-path merges).
     pub(crate) lexical_stats: bool,
+    /// True when this open loaded the graph from CF_GRAPH rather than rebuilding
+    /// it from the durable vectors — the observable behind the startup gate.
+    graph_loaded: bool,
+    /// Whether [`Estate::persist_graph`] runs on drop (default true). Turning it
+    /// off leaves the on-disk graph blob as it is, so the next open sees whatever
+    /// state a crash would have left — the hook the crash-recovery test needs.
+    persist_on_drop: std::sync::atomic::AtomicBool,
     applier: Option<std::thread::JoinHandle<()>>,
     info: EstateInfo,
 }
@@ -385,24 +392,39 @@ impl Estate {
             }
         };
 
-        // Rebuild the ANN graph from durable vectors.
-        let mut ann = AnnIndex::new(AnnConfig {
+        // Load the ANN graph. A clean shutdown persists the derived graph to
+        // CF_GRAPH tagged with the changefeed seq it was captured at; if that seq
+        // still matches the live feed_seq, nothing has changed the graph since,
+        // and we load it directly instead of rebuilding — the difference between
+        // opening a 10M-vector estate in read-time and in rebuild-time. Any
+        // mismatch, absence, or decode failure falls through to the rebuild, so
+        // the durable vectors remain the sole source of truth and a stale or
+        // corrupt cache can never serve wrong results.
+        let ann_config = AnnConfig {
             quantized: config.quantized,
             ..AnnConfig::default()
-        });
-        {
-            let handle = db.cf(CF_VECS)?;
-            let mut rebuilt = 0u64;
-            for item in db.0.iterator_cf(handle, rocksdb::IteratorMode::Start) {
-                let (k, v) = item.map_err(rocks_err)?;
-                let id = Id::new(String::from_utf8_lossy(&k).into_owned());
-                ann.insert(id, &Embedding(keys::decode_vec(&v)));
-                rebuilt += 1;
+        };
+        let (ann, graph_loaded) = match Self::load_persisted_graph(&db, ann_config.clone())? {
+            Some(loaded) => {
+                tracing::info!(vectors = loaded.len(), "ann graph loaded from CF_GRAPH");
+                (loaded, true)
             }
-            if rebuilt > 0 {
-                tracing::info!(rebuilt, "ann graph rebuilt from durable vectors");
+            None => {
+                let mut ann = AnnIndex::new(ann_config);
+                let handle = db.cf(CF_VECS)?;
+                let mut rebuilt = 0u64;
+                for item in db.0.iterator_cf(handle, rocksdb::IteratorMode::Start) {
+                    let (k, v) = item.map_err(rocks_err)?;
+                    let id = Id::new(String::from_utf8_lossy(&k).into_owned());
+                    ann.insert(id, &Embedding(keys::decode_vec(&v)));
+                    rebuilt += 1;
+                }
+                if rebuilt > 0 {
+                    tracing::info!(rebuilt, "ann graph rebuilt from durable vectors");
+                }
+                (ann, false)
             }
-        }
+        };
 
         let ann = Arc::new(StdRwLock::new(ann));
         let pending = crate::pending::Pending::new();
@@ -424,6 +446,8 @@ impl Estate {
             feed_notify: Arc::new(tokio::sync::Notify::new()),
             quotas: config.quotas.clone(),
             lexical_stats,
+            graph_loaded,
+            persist_on_drop: std::sync::atomic::AtomicBool::new(true),
             applier: Some(applier),
             info,
         })
@@ -747,9 +771,14 @@ impl Estate {
     /// Write a consistent point-in-time snapshot of the whole estate to
     /// `path` (RocksDB checkpoint: hard-links immutable SST files, copies the
     /// WAL — cheap and crash-consistent). The snapshot directory opens as a
-    /// fully working estate via [`Estate::open`]; the ANN graph rebuilds from
-    /// its durable vectors as on any open.
+    /// fully working estate via [`Estate::open`]; its persisted graph loads
+    /// directly (or rebuilds from the durable vectors, as on any open).
     pub fn snapshot_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        // Capture the graph first so the checkpoint carries a loadable blob and
+        // the snapshot opens in read-time too (best-effort; a rebuild covers any
+        // decline). Callers snapshot at quiescent points, which is what
+        // `persist_graph` needs.
+        let _ = self.persist_graph();
         let checkpoint = rocksdb::checkpoint::Checkpoint::new(&self.db.0).map_err(rocks_err)?;
         checkpoint
             .create_checkpoint(path.as_ref())
@@ -814,6 +843,19 @@ impl Estate {
 
 impl Drop for Estate {
     fn drop(&mut self) {
+        // Clean shutdown: persist the derived graph so the next open loads it in
+        // read-time instead of rebuilding in O(N log N). Best-effort — this is the
+        // last handle, so no writer can race, but if it fails for any reason the
+        // durable vectors still rebuild the graph on open. A crash that skips Drop
+        // simply leaves a stale/absent blob, which the seq check rejects → rebuild.
+        if self
+            .persist_on_drop
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Err(err) = self.persist_graph() {
+                tracing::warn!(%err, "graph persist on shutdown failed — open will rebuild");
+            }
+        }
         // Stop the applier cleanly; unapplied pendings are already durable in
         // the vecs column family and reappear via rebuild-on-open.
         self.pending.stop();
@@ -1067,6 +1109,100 @@ impl Estate {
 }
 
 impl Estate {
+    /// Read the persisted ANN graph from CF_GRAPH, but only if it is still
+    /// current. The blob is `[feed_seq u64 LE][AnnIndex::to_bytes]`; the seq tag
+    /// is the graph's as-of point on the changefeed. When it equals the live
+    /// `feed_seq` nothing has mutated the graph since it was captured, so the
+    /// decoded graph is exact and we return it. Any staleness, absence, or decode
+    /// failure returns `None`, and the caller rebuilds from the durable vectors —
+    /// the cache is never trusted over the source of truth.
+    fn load_persisted_graph(db: &Db, config: AnnConfig) -> Result<Option<AnnIndex>> {
+        let handle = db.cf(keys::CF_GRAPH)?;
+        let Some(blob) = db.0.get_cf(handle, keys::GRAPH_ANN).map_err(rocks_err)? else {
+            return Ok(None);
+        };
+        if blob.len() < 8 {
+            return Ok(None);
+        }
+        let seq = u64::from_le_bytes(blob[..8].try_into().expect("8 bytes"));
+        let live_seq = db.get_u64(keys::META_FEED_SEQ)?;
+        if seq != live_seq {
+            tracing::info!(
+                persisted = seq,
+                live = live_seq,
+                "persisted graph stale — rebuilding"
+            );
+            return Ok(None);
+        }
+        match AnnIndex::from_bytes(&blob[8..], config) {
+            Some(ann) => Ok(Some(ann)),
+            None => {
+                tracing::warn!("persisted graph failed to decode — rebuilding");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Whether this open loaded the graph from CF_GRAPH (`true`) or rebuilt it
+    /// from the durable vectors (`false`). The observable behind "restart loads,
+    /// not rebuilds."
+    pub fn graph_was_loaded(&self) -> bool {
+        self.graph_loaded
+    }
+
+    /// Enable/disable persisting the graph on drop (default enabled). Disabling
+    /// leaves the on-disk blob untouched at shutdown, so the next open sees the
+    /// state a crash would have left — a stale or absent graph that must rebuild.
+    pub fn set_persist_graph_on_drop(&self, on: bool) {
+        self.persist_on_drop
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Capture the in-memory ANN graph to CF_GRAPH so the next open loads it
+    /// instead of rebuilding — the write side of `load_persisted_graph`.
+    ///
+    /// Must be called at a quiescent point (shutdown, or an operator-driven
+    /// snapshot): the graph and the changefeed seq it is tagged with have to be
+    /// captured for the *same* state, and there is no lock that freezes commits.
+    /// This holds the ANN read lock (which stalls the applier) and re-reads
+    /// `feed_seq` around the serialization; if a write races in, it declines to
+    /// persist rather than write a mis-tagged blob — the open path just rebuilds.
+    /// Persisting is always optional: the durable vectors are the truth.
+    pub fn persist_graph(&self) -> Result<()> {
+        self.quiesce();
+        let guard = self.ann.read().expect("ann lock poisoned");
+        // A nonzero backlog means committed graph ops the applier has not yet
+        // folded in — the graph trails the changefeed and cannot be tagged.
+        if self.pending.backlog() != 0 {
+            tracing::debug!("skipping graph persist: applier backlog nonzero");
+            return Ok(());
+        }
+        let seq_before = self.db.get_u64(keys::META_FEED_SEQ)?;
+        let bytes = guard.to_bytes();
+        drop(guard);
+        // If a commit slipped in while we serialized (it can bump feed_seq even
+        // under the read lock, though the applier could not have folded it in),
+        // the bytes no longer correspond to `seq_before` — decline and rebuild.
+        if self.db.get_u64(keys::META_FEED_SEQ)? != seq_before {
+            tracing::debug!("skipping graph persist: feed_seq moved mid-capture");
+            return Ok(());
+        }
+        let mut blob = Vec::with_capacity(8 + bytes.len());
+        blob.extend_from_slice(&seq_before.to_le_bytes());
+        blob.extend_from_slice(&bytes);
+        let handle = self.db.cf(keys::CF_GRAPH)?;
+        self.db
+            .0
+            .put_cf(handle, keys::GRAPH_ANN, &blob)
+            .map_err(rocks_err)?;
+        self.db.0.flush_cf(handle).map_err(rocks_err)?;
+        rro_core::events::emit(
+            "estate.graph_persist",
+            serde_json::json!({ "seq": seq_before, "bytes": blob.len() }),
+        );
+        Ok(())
+    }
+
     /// Flush every column family's memtable and sync the WAL — the
     /// explicit ack point: after this returns, everything acknowledged is
     /// on disk regardless of process or power fate.

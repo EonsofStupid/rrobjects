@@ -1,11 +1,13 @@
 //! Query execution: one spec ([`rro_core::EstateQuery`], pure data in the
 //! core contract), every retrieval capability of the estate.
 //!
-//! Filter execution is two-strategy: **filter-first** (exact id-set from
-//! payload secondary indexes, then exact scoring inside it) when every
-//! referenced field is indexed and the set is small enough; **post-filter**
-//! (over-fetch + hydrate + retain) otherwise. Facets, filtered counts, and
-//! cursor-paged **scroll** live beside it on the estate.
+//! Filter execution is **three-strategy**, chosen by the exact cardinality the
+//! payload index already resolves (no estimation): **exact scoping** (score the
+//! whole matched id-set when it is ≤ `EXACT_SCOPE_MAX`), **filter-aware graph
+//! traversal** (walk the HNSW graph admitting only allowed nodes, when the
+//! matched set is larger), and **post-filter** (over-fetch + hydrate + retain)
+//! only when the filter cannot be resolved from indexes at all. Facets, filtered
+//! counts, and cursor-paged **scroll** live beside it on the estate.
 
 use rro_core::{Candidate, Embedding, EstateQuery, Metadata, Result};
 

@@ -22,7 +22,7 @@
 /// All column families, in creation order.
 pub const COLUMN_FAMILIES: &[&str] = &[
     CF_META, CF_NODES, CF_CONNS, CF_DOCS, CF_VECS, CF_TERMS, CF_TAGS, CF_TRENDS, CF_RELS, CF_FEED,
-    CF_PIDX, CF_SPARSE, CF_NVECS, CF_MVECS, CF_COLL, CF_TDF,
+    CF_PIDX, CF_SPARSE, CF_NVECS, CF_MVECS, CF_COLL, CF_TDF, CF_GRAPH,
 ];
 
 /// Estate metadata + counters.
@@ -62,6 +62,15 @@ pub const CF_COLL: &str = "coll";
 /// stats that make max-score pruning possible without breaking the
 /// no-read-modify-write law.
 pub const CF_TDF: &str = "tdf";
+/// Persisted ANN graph: `GRAPH_ANN` → `[feed_seq u64 LE][AnnIndex::to_bytes]`.
+/// A *cache* of the graph derived from `vecs`, tagged with the changefeed seq it
+/// was captured at. On open, a blob whose seq matches the live `feed_seq` loads
+/// directly (O(read)); any mismatch or absence falls back to rebuilding from
+/// `vecs` (O(N log N)) — so the durable vectors stay the sole source of truth.
+pub const CF_GRAPH: &str = "graph";
+
+/// graph: the single persisted-graph row key.
+pub const GRAPH_ANN: &[u8] = b"ann";
 
 /// meta: the estate info blob.
 pub const META_ESTATE: &[u8] = b"estate";

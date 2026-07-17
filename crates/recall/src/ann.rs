@@ -532,6 +532,171 @@ impl AnnIndex {
         let kept = self.select_diverse(&scored, max_links);
         self.links[node as usize][layer] = kept.into_iter().map(|s| s.node).collect();
     }
+
+    /// Serialize the whole graph to a compact, self-describing binary blob.
+    ///
+    /// This is what makes startup O(load) instead of O(N log N): the estate
+    /// rebuilds the ANN graph from the durable vectors on every open by
+    /// re-inserting each one, which is the dominant cost of a cold start. Persist
+    /// this blob at flush/shutdown and load it back instead, and a 10M-vector
+    /// estate opens in the time it takes to read a file rather than to rebuild an
+    /// HNSW graph from scratch.
+    ///
+    /// The durable vectors remain the source of truth (this is a *cache* of the
+    /// derived graph); a mismatch on load falls back to the rebuild, so a stale or
+    /// corrupt blob can never serve wrong results — see [`AnnIndex::from_bytes`].
+    /// Zero-dependency hand-rolled format, little-endian, matching the rest of the
+    /// tree's binary encodings; a version byte guards forward compatibility.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut w = Vec::with_capacity(4 * 1024);
+        w.extend_from_slice(b"RROG"); // magic
+        w.push(1); // format version
+        w.extend_from_slice(&(self.dim.unwrap_or(0) as u32).to_le_bytes());
+        w.extend_from_slice(&self.rng.to_le_bytes());
+        w.extend_from_slice(&(self.live as u64).to_le_bytes());
+        match self.entry {
+            Some((node, layer)) => {
+                w.push(1);
+                w.extend_from_slice(&node.to_le_bytes());
+                w.extend_from_slice(&(layer as u32).to_le_bytes());
+            }
+            None => w.push(0),
+        }
+        let n = self.ids.len();
+        w.extend_from_slice(&(n as u32).to_le_bytes());
+        for id in &self.ids {
+            let b = id.as_str().as_bytes();
+            w.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            w.extend_from_slice(b);
+        }
+        for &d in &self.deleted {
+            w.push(d as u8);
+        }
+        for node_links in &self.links {
+            w.extend_from_slice(&(node_links.len() as u32).to_le_bytes());
+            for layer in node_links {
+                w.extend_from_slice(&(layer.len() as u32).to_le_bytes());
+                for &nb in layer {
+                    w.extend_from_slice(&nb.to_le_bytes());
+                }
+            }
+        }
+        match &self.store {
+            Store::Full(v) => {
+                w.push(0);
+                w.extend_from_slice(&(v.len() as u64).to_le_bytes());
+                for &x in v {
+                    w.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+            Store::Sq8 { codes, params } => {
+                w.push(1);
+                w.extend_from_slice(&(codes.len() as u64).to_le_bytes());
+                w.extend_from_slice(codes);
+                w.extend_from_slice(&(params.len() as u32).to_le_bytes());
+                for p in params {
+                    w.extend_from_slice(&p.scale.to_le_bytes());
+                    w.extend_from_slice(&p.offset.to_le_bytes());
+                    w.extend_from_slice(&p.code_sum.to_le_bytes());
+                }
+            }
+        }
+        w
+    }
+
+    /// Load a graph from [`AnnIndex::to_bytes`]. Returns `None` if the blob is not
+    /// a valid, current-version graph — the caller then rebuilds from the durable
+    /// vectors, so a bad cache degrades to correct-but-slower, never to wrong.
+    ///
+    /// `config` is supplied by the caller (it is an open-time choice, not graph
+    /// state), and `quantized` must match how the blob was written or the store
+    /// tag check rejects it.
+    pub fn from_bytes(bytes: &[u8], config: AnnConfig) -> Option<AnnIndex> {
+        let mut r = ByteReader::new(bytes);
+        if r.take(4)? != b"RROG" || r.u8()? != 1 {
+            return None;
+        }
+        let dim_raw = r.u32()? as usize;
+        let dim = if dim_raw == 0 { None } else { Some(dim_raw) };
+        let rng = r.u64()?;
+        let live = r.u64()? as usize;
+        let entry = if r.u8()? == 1 {
+            Some((r.u32()?, r.u32()? as usize))
+        } else {
+            None
+        };
+        let n = r.u32()? as usize;
+        let mut ids = Vec::with_capacity(n);
+        let mut by_id = HashMap::with_capacity(n);
+        for node in 0..n {
+            let len = r.u32()? as usize;
+            let s = std::str::from_utf8(r.take(len)?).ok()?.to_string();
+            let id = Id::new(s);
+            by_id.insert(id.clone(), node as u32);
+            ids.push(id);
+        }
+        let mut deleted = Vec::with_capacity(n);
+        for _ in 0..n {
+            deleted.push(r.u8()? != 0);
+        }
+        let mut links = Vec::with_capacity(n);
+        for _ in 0..n {
+            let nlayers = r.u32()? as usize;
+            let mut node_links = Vec::with_capacity(nlayers);
+            for _ in 0..nlayers {
+                let count = r.u32()? as usize;
+                let mut layer = Vec::with_capacity(count);
+                for _ in 0..count {
+                    layer.push(r.u32()?);
+                }
+                node_links.push(layer);
+            }
+            links.push(node_links);
+        }
+        let store = match r.u8()? {
+            0 => {
+                let len = r.u64()? as usize;
+                let mut v = Vec::with_capacity(len);
+                for _ in 0..len {
+                    v.push(r.f32()?);
+                }
+                Store::Full(v)
+            }
+            1 => {
+                let clen = r.u64()? as usize;
+                let codes = r.take(clen)?.to_vec();
+                let np = r.u32()? as usize;
+                let mut params = Vec::with_capacity(np);
+                for _ in 0..np {
+                    params.push(crate::quant::SqParams {
+                        scale: r.f32()?,
+                        offset: r.f32()?,
+                        code_sum: r.f32()?,
+                    });
+                }
+                Store::Sq8 { codes, params }
+            }
+            _ => return None,
+        };
+        // The store tag must agree with how this estate is configured, or a
+        // quantized estate would load full vectors (or vice versa) and score wrong.
+        let store_is_sq8 = matches!(store, Store::Sq8 { .. });
+        if store_is_sq8 != config.quantized {
+            return None;
+        }
+        Some(AnnIndex {
+            config,
+            dim,
+            store,
+            ids,
+            by_id,
+            deleted,
+            links,
+            entry,
+            rng,
+            live,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -680,6 +845,85 @@ mod tests {
         let (idx, _) = build(50, 8);
         assert!(idx.search(&Embedding(vec![1.0; 16]), 5, 32).is_empty());
     }
+
+    /// A persisted graph must reload byte-identical in every field that governs
+    /// search, and — the property that actually matters — return the *same
+    /// results* as the graph it was serialized from. This is the correctness
+    /// guarantee behind loading the graph instead of rebuilding it on open.
+    #[test]
+    fn to_from_bytes_round_trips_and_search_is_identical() {
+        let (mut idx, vecs) = build(1000, 48);
+        // Exercise tombstones + overwrite so deleted/live/links are non-trivial.
+        idx.remove(&"v7".into());
+        idx.insert("v8".into(), &vecs[900]);
+
+        let bytes = idx.to_bytes();
+        let back = AnnIndex::from_bytes(&bytes, AnnConfig::default())
+            .expect("valid blob must deserialize");
+
+        assert_eq!(back.len(), idx.len());
+        assert_eq!(back.dim, idx.dim);
+        assert_eq!(back.entry, idx.entry);
+        assert_eq!(back.ids, idx.ids);
+        assert_eq!(back.deleted, idx.deleted);
+        assert_eq!(back.links, idx.links);
+
+        for qi in 0..50 {
+            let q = Embedding(pseudo_vec(2_000_000 + qi as u64, 48));
+            let a = idx.search(&q, 10, 128);
+            let b = back.search(&q, 10, 128);
+            assert_eq!(a.len(), b.len());
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert_eq!(x.0.as_str(), y.0.as_str(), "result order must match");
+            }
+        }
+    }
+
+    /// Quantized graphs must round-trip too, and the store-tag guard must reject a
+    /// blob whose quantization does not match the estate's configuration — that
+    /// mismatch is exactly what forces a safe rebuild rather than scoring wrong.
+    #[test]
+    fn quantized_round_trips_and_store_tag_guards_config() {
+        let mut idx = AnnIndex::new(AnnConfig {
+            quantized: true,
+            ..AnnConfig::default()
+        });
+        for i in 0..500 {
+            idx.insert(Id::new(format!("v{i}")), &Embedding(pseudo_vec(i, 32)));
+        }
+        let bytes = idx.to_bytes();
+
+        // Correct config: loads.
+        let back = AnnIndex::from_bytes(
+            &bytes,
+            AnnConfig {
+                quantized: true,
+                ..AnnConfig::default()
+            },
+        )
+        .expect("quantized blob must load under quantized config");
+        assert!(back.is_quantized());
+        assert_eq!(back.len(), idx.len());
+
+        // Mismatched config (expects full vectors): rejected → caller rebuilds.
+        assert!(
+            AnnIndex::from_bytes(&bytes, AnnConfig::default()).is_none(),
+            "sq8 blob under a full-vector config must be rejected"
+        );
+    }
+
+    /// Truncated or garbage bytes must never panic — they return `None` so the
+    /// estate falls back to rebuilding from the durable vectors.
+    #[test]
+    fn corrupt_bytes_return_none_not_panic() {
+        assert!(AnnIndex::from_bytes(b"", AnnConfig::default()).is_none());
+        assert!(AnnIndex::from_bytes(b"RROG", AnnConfig::default()).is_none());
+        assert!(AnnIndex::from_bytes(b"XXXX\x01", AnnConfig::default()).is_none());
+        let (idx, _) = build(100, 16);
+        let mut bytes = idx.to_bytes();
+        bytes.truncate(bytes.len() / 2);
+        assert!(AnnIndex::from_bytes(&bytes, AnnConfig::default()).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -757,5 +1001,42 @@ mod filter_aware_tests {
             &std::collections::HashSet::new(),
         );
         assert!(got.is_empty());
+    }
+}
+
+/// A tiny bounds-checked little-endian reader for [`AnnIndex::from_bytes`].
+/// Every read returns `Option`, so a truncated or malformed blob yields `None`
+/// (→ rebuild) instead of a panic.
+struct ByteReader<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    fn new(b: &'a [u8]) -> Self {
+        ByteReader { b, i: 0 }
+    }
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.i.checked_add(n)?;
+        let s = self.b.get(self.i..end)?;
+        self.i = end;
+        Some(s)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|s| s[0])
+    }
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4)
+            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        let s = self.take(8)?;
+        Some(u64::from_le_bytes([
+            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+        ]))
+    }
+    fn f32(&mut self) -> Option<f32> {
+        self.take(4)
+            .map(|s| f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
 }
