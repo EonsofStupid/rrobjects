@@ -245,6 +245,21 @@ impl Estate {
         // a different number, not two paths.
         opts.increase_parallelism(config.background_jobs as i32);
         opts.set_max_background_jobs(config.background_jobs as i32);
+
+        // The memtable budget is the sum nobody was computing. `write_buffer_size`
+        // is set PER CF (below), and RocksDB keeps up to `max_write_buffer_number`
+        // (default 2) live per CF — so the real ceiling is
+        // `write_buffer_bytes × max_write_buffer_number × COLUMN_FAMILY_COUNT`.
+        // At the defaults that is 64 MiB × 2 × 16 = **2 GiB** of memtables, a
+        // number that just fell out of a per-CF knob nobody multiplied out. Cap
+        // it explicitly with `db_write_buffer_size`, a hard ceiling across all
+        // CFs, so the estate's write memory is a stated budget rather than an
+        // accident of the CF count.
+        let max_write_buffers = 2u64;
+        let memtable_budget =
+            (config.write_buffer_bytes as u64) * max_write_buffers * (COLUMN_FAMILIES.len() as u64);
+        opts.set_db_write_buffer_size(memtable_budget as usize);
+
         // One shared block cache across CFs: a per-CF cache partitions memory by
         // guesswork, and the hot set moves with the workload.
         let cache = rocksdb::Cache::new_lru_cache(config.block_cache_bytes);
@@ -294,8 +309,45 @@ impl Estate {
                 // read path. Everything else (text, postings, JSON) does.
                 if matches!(*cf, keys::CF_VECS | keys::CF_NVECS | keys::CF_MVECS) {
                     cf_opts.set_compression_type(rocksdb::DBCompressionType::None);
+
+                    // BlobDB for the vector CFs. A 2560-d f32 vector is ~10 KiB,
+                    // and in a plain LSM every value is rewritten by every
+                    // compaction that touches its key — so the vectors, which
+                    // never change, get copied over and over for the sake of
+                    // compacting the small keys around them. BlobDB stores values
+                    // above `min_blob_size` in separate blob files that the LSM
+                    // only references, so compaction moves 8-byte pointers instead
+                    // of 10 KiB payloads. `min_blob_size` is set below a single
+                    // vector so every vector lands in a blob; nothing smaller
+                    // (there is nothing smaller in these CFs) pays the indirection.
+                    cf_opts.set_enable_blob_files(true);
+                    cf_opts.set_min_blob_size(4 * 1024);
+                    cf_opts.set_enable_blob_gc(true);
                 } else {
                     cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+                }
+
+                // The BM25 postings CF is read by **prefix scan**: keys are
+                // `term \x00 doc_id` and a lexical lookup seeks `term \x00` then
+                // iterates. A whole-key bloom cannot help a scan (it answers "is
+                // this exact key present", not "does this prefix exist"), so
+                // `CF_TERMS` was left with no filter at all — every posting-list
+                // read paid full index descent. A **prefix** extractor + memtable
+                // prefix bloom fixes exactly that: the bloom answers "could this
+                // term have any postings" and skips SSTables and memtables that
+                // hold none. The extractor is custom because terms are
+                // variable-length — the prefix is everything up to and including
+                // the first NUL, not a fixed byte count.
+                if *cf == keys::CF_TERMS {
+                    cf_opts.set_prefix_extractor(rocksdb::SliceTransform::create(
+                        "term_prefix",
+                        |key: &[u8]| match key.iter().position(|&b| b == 0) {
+                            Some(nul) => &key[..=nul],
+                            None => key,
+                        },
+                        Some(|key: &[u8]| key.contains(&0)),
+                    ));
+                    cf_opts.set_memtable_prefix_bloom_ratio(0.1);
                 }
 
                 cf_opts.set_write_buffer_size(config.write_buffer_bytes);
