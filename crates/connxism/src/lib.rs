@@ -29,7 +29,9 @@ mod store;
 mod strategies;
 mod txn;
 
-pub use estate::{Estate, EstateConfig, FeedStats, HealthReport, Issue, Quotas};
+pub use estate::{
+    Estate, EstateConfig, FeedStats, GraphCompaction, GraphNodes, HealthReport, Issue, Quotas,
+};
 pub use recall::Quantizer;
 
 /// How many column families one estate manages (ops surface sizing).

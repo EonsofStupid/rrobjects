@@ -582,8 +582,15 @@ impl Handler for FlowNode {
                         serde_json::json!({ "ok": true })
                     }
                     "compact" => {
+                        // Full optimize pass: reclaim ANN tombstones, then compact
+                        // the RocksDB column families.
+                        let graph = estate.compact_graph()?;
                         estate.compact()?;
-                        serde_json::json!({ "ok": true, "cf_bytes": estate.cf_sizes()? })
+                        serde_json::json!({
+                            "ok": true,
+                            "graph_reclaimed": graph.reclaimed(),
+                            "cf_bytes": estate.cf_sizes()?,
+                        })
                     }
                     "collections" => {
                         serde_json::json!({ "collections": estate.collections()? })

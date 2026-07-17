@@ -667,6 +667,18 @@ impl AnnIndex {
         self.live == 0
     }
 
+    /// Total nodes including tombstones (live + dead). The graph's storage,
+    /// traversal, and RAM all scale with this, not [`AnnIndex::len`].
+    pub fn node_count(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Tombstoned (dead) nodes — removed or overwritten, still traversed and
+    /// occupying storage until a compaction rebuilds the graph without them.
+    pub fn tombstones(&self) -> usize {
+        self.ids.len() - self.live
+    }
+
     /// Whether vector storage is lossy (SQ8 or BQ) — scores approximate, rescore
     /// if the full-precision vectors are available elsewhere.
     pub fn is_quantized(&self) -> bool {

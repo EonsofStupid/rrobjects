@@ -439,21 +439,7 @@ impl Estate {
                 );
                 (loaded, true)
             }
-            None => {
-                let mut ann = AnnIndex::new(ann_config);
-                let handle = db.cf(CF_VECS)?;
-                let mut rebuilt = 0u64;
-                for item in db.0.iterator_cf(handle, rocksdb::IteratorMode::Start) {
-                    let (k, v) = item.map_err(rocks_err)?;
-                    let id = Id::new(String::from_utf8_lossy(&k).into_owned());
-                    ann.insert(id, &Embedding(keys::decode_vec(&v)));
-                    rebuilt += 1;
-                }
-                if rebuilt > 0 {
-                    tracing::info!(rebuilt, "ann graph rebuilt from durable vectors");
-                }
-                (ann, false)
-            }
+            None => (Self::rebuild_ann_from_vecs(&db, ann_config)?, false),
         };
 
         let ann = Arc::new(StdRwLock::new(ann));
@@ -1030,6 +1016,38 @@ impl Estate {
     }
 }
 
+/// Live + tombstoned node counts of the ANN graph — the compaction gauge.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct GraphNodes {
+    /// Total nodes, live plus tombstoned.
+    pub total: usize,
+    /// Dead nodes (removed or overwritten) still occupying the graph.
+    pub tombstones: usize,
+}
+
+impl GraphNodes {
+    /// Live (non-tombstoned) nodes.
+    pub fn live(&self) -> usize {
+        self.total - self.tombstones
+    }
+}
+
+/// Before/after of a [`Estate::compact_graph`] pass.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct GraphCompaction {
+    /// Node counts before compaction.
+    pub before: GraphNodes,
+    /// Node counts after (tombstone-free).
+    pub after: GraphNodes,
+}
+
+impl GraphCompaction {
+    /// Nodes reclaimed (the tombstones that were dropped).
+    pub fn reclaimed(&self) -> usize {
+        self.before.total.saturating_sub(self.after.total)
+    }
+}
+
 /// A live snapshot of the estate's operational state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HealthReport {
@@ -1047,6 +1065,10 @@ pub struct HealthReport {
     pub named_dims: std::collections::BTreeMap<String, usize>,
     /// Whether the ANN graph holds SQ8 codes.
     pub quantized: bool,
+    /// Tombstoned (dead) ANN nodes awaiting compaction — the gauge for when a
+    /// graph compaction is worth running.
+    #[serde(default)]
+    pub graph_tombstones: usize,
     /// Live SST bytes per column family (optimizer status).
     #[serde(default)]
     pub cf_bytes: Vec<(String, u64)>,
@@ -1081,6 +1103,7 @@ impl Estate {
             dim: info.dim,
             named_dims: info.named_dims,
             quantized: self.quantizer.is_lossy(),
+            graph_tombstones: self.graph_nodes().tombstones,
             cf_bytes: self.cf_sizes()?,
             quotas: self.quotas.clone(),
         })
@@ -1188,11 +1211,92 @@ impl Estate {
         }
     }
 
+    /// Build a fresh ANN graph by re-inserting every durable vector. The `vecs`
+    /// column family holds exactly the live vectors (an overwrite replaces the
+    /// row, a remove deletes it), so the rebuilt graph carries **no tombstones**
+    /// — this is both the open-time recovery path and the compaction path.
+    fn rebuild_ann_from_vecs(db: &Db, config: AnnConfig) -> Result<AnnIndex> {
+        let mut ann = AnnIndex::new(config);
+        let handle = db.cf(CF_VECS)?;
+        let mut rebuilt = 0u64;
+        for item in db.0.iterator_cf(handle, rocksdb::IteratorMode::Start) {
+            let (k, v) = item.map_err(rocks_err)?;
+            let id = Id::new(String::from_utf8_lossy(&k).into_owned());
+            ann.insert(id, &Embedding(keys::decode_vec(&v)));
+            rebuilt += 1;
+        }
+        if rebuilt > 0 {
+            tracing::info!(rebuilt, "ann graph rebuilt from durable vectors");
+        }
+        Ok(ann)
+    }
+
+    /// Compact the ANN graph: rebuild it tombstone-free from the durable vectors
+    /// and swap it in. Deletes and overwrites leave dead nodes behind (soft
+    /// tombstones — still traversed, still occupying RAM/disk); over a churny
+    /// estate's life they dominate, so this is the vector-side optimizer that
+    /// reclaims them. Returns the (before, after) node counts.
+    ///
+    /// The rebuild runs O(N log N) **without** the graph lock; the swap is atomic
+    /// under the write lock, and is applied only if no write raced the rebuild —
+    /// otherwise the fresh graph would be missing those writes, so it retries.
+    /// Best invoked during a quiet window (a maintenance op, like `compact`).
+    pub fn compact_graph(&self) -> Result<GraphCompaction> {
+        let before = {
+            let g = self.ann.read().expect("ann lock");
+            GraphNodes {
+                total: g.node_count(),
+                tombstones: g.tombstones(),
+            }
+        };
+        let ann_config = AnnConfig {
+            quantizer: self.quantizer,
+            ..AnnConfig::default()
+        };
+        for _ in 0..4 {
+            self.quiesce();
+            let seq0 = self.db.get_u64(keys::META_FEED_SEQ)?;
+            // Rebuild lock-free; a concurrent write may land in `vecs` meanwhile.
+            let mut fresh = Self::rebuild_ann_from_vecs(&self.db, ann_config.clone())?;
+            fresh.seal(); // train PQ if applicable, so the fresh graph matches
+            self.quiesce();
+            // Swap only if nothing changed the vectors during the rebuild.
+            if self.pending.backlog() == 0 && self.db.get_u64(keys::META_FEED_SEQ)? == seq0 {
+                let after = GraphNodes {
+                    total: fresh.node_count(),
+                    tombstones: fresh.tombstones(),
+                };
+                *self.ann.write().expect("ann lock") = fresh;
+                rro_core::events::emit(
+                    "estate.graph_compact",
+                    serde_json::json!({
+                        "before_total": before.total,
+                        "after_total": after.total,
+                        "reclaimed": before.total.saturating_sub(after.total),
+                    }),
+                );
+                return Ok(GraphCompaction { before, after });
+            }
+        }
+        Err(RroError::msg(
+            "graph compaction kept racing writes — retry during a quieter window",
+        ))
+    }
+
     /// Whether this open loaded the graph from CF_GRAPH (`true`) or rebuilt it
     /// from the durable vectors (`false`). The observable behind "restart loads,
     /// not rebuilds."
     pub fn graph_was_loaded(&self) -> bool {
         self.graph_loaded
+    }
+
+    /// Live + tombstoned node counts of the ANN graph.
+    pub fn graph_nodes(&self) -> GraphNodes {
+        let g = self.ann.read().expect("ann lock");
+        GraphNodes {
+            total: g.node_count(),
+            tombstones: g.tombstones(),
+        }
     }
 
     /// Heap bytes the ANN graph holds for vectors — the RAM tail plus the bounded
