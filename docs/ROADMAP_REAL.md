@@ -119,8 +119,10 @@ Verified by reading code *and call sites*, not `README`/`ASSESSMENT` (both stale
 | capability | status | phase |
 |---|---|---|
 | RRD gate ladder + centroid semantic router | ✅ | — |
+| RRD baseline: shape prediction, predictability, PSI drift | ✅ | — |
+| **Shape as early intent** — COSTAR fields → distinct slivers, 97%-gated speculation, cross-session-stable ids | ✅ 2026-07-17 | — |
 | Constrained-decode readiness classifier | ✅ | — |
-| Embedder + reranker in-binary, 3 engines each | ✅ built · ❌ **unproven** | **3** |
+| Embedder + reranker in-binary, 3 engines each | ✅ built · ✅ **proven (Phase 3)** | **3** |
 | MRL truncation | ✅ inference · ❌ training | **9** |
 | Matryoshka / quantization-aware **training** | ❌ greenfield | **9** |
 | TOON recall→LLM encoding | ❌ zero in tree | **8** |
