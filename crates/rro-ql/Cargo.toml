@@ -1,0 +1,23 @@
+[package]
+name = "rro-ql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "RRQL — Reason Ready Query Language: text -> the typed query plane. Parsing only; no execution."
+
+# Zero dependencies beyond the typed contract it lowers onto and serde_json for
+# literal values. Hand-rolled lexer + recursive-descent parser: RRO has no
+# nom/pest/logos anywhere, and a query language is not a reason to start (the
+# same call the repo already made twice for HTTP). See docs/adr/0003-rro-ql.md.
+[dependencies]
+rro-core = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -16,6 +16,17 @@ ROADMAP.md for execution purposes._
 ---
 
 ## P7 — REAL MODELS (FIRST; the actual deliverable)
+
+> **P7 STATUS — 2026-07-16: LANDED.** This section's framing ("the models were
+> never wired… Priority #1") is now stale. Done: `model-registry` (P7.1);
+> the candle Qwen3 encoder (P7.2, matches the model card to ~6dp); llama.cpp +
+> vLLM backends (P7.3, candle==vLLM elementwise 0.9999 on the same weights);
+> cross-encoder rerankers on all three (P7.4, BM25 0.50 → 1.00 golden@1); the
+> first honest benchmark (P7.3/P7.6 → `docs/BENCHMARKS_REAL.md`, BM25 0.3115 vs
+> published BEIR ~0.325 — the harness's calibration anchor).
+> Still open from this section: **re-tune ANN `ef` on real vectors** (the
+> recall@10 ≥ 0.95 gate at `recall/src/ann.rs:533` was measured on SYNTHETIC
+> vectors) and the tier ladder / BRIGHT.
 Full spec: **docs/MODELS.md**. Ordered work:
 1. **`model-registry` crate**: config→boxed-trait selection (`EmbedderKind`,
    `RerankerConfig`), env-driven, features `candle`/`onnx`. Gate: `deterministic`

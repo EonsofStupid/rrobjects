@@ -41,10 +41,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use model_registry::{build_embedder, build_reranker, EmbedderConfig, RerankerConfig};
+use rro_core::events::{Event, EventSink};
 use rro_core::{Candidate, Document, Recall, Reranker, VectorRecord};
 
 /// One benchmark query with its graded judgments.
@@ -55,13 +56,88 @@ struct EvalQuery {
     rels: HashMap<String, u8>,
 }
 
+/// Collects the `flow.stage` timings the engine already emits, so latency can be
+/// attributed per stage instead of wall-clocked around the whole call.
+///
+/// This exists because the first version of this harness timed its own loop and
+/// printed the total under a column called `ms/query` — which meant an HTTP
+/// round-trip plus a 4B model forward plus 100 cross-encoder pairs were all
+/// reported as if they were engine latency (1167 ms). The engine's own `recall`
+/// stage is 0.404 ms. Model cost and engine cost are different things, and a
+/// harness that adds them together is measuring nothing anyone can act on.
+#[derive(Default)]
+struct StageCollector {
+    /// stage name -> observed durations (ms)
+    stages: Mutex<HashMap<String, Vec<f64>>>,
+}
+
+impl EventSink for StageCollector {
+    fn record(&self, event: Event) {
+        if event.kind != rro_core::semconv::EVENT_STAGE {
+            return;
+        }
+        let (Some(name), Some(ms)) = (
+            event
+                .fields
+                .get(rro_core::semconv::attr::STAGE)
+                .and_then(|v| v.as_str()),
+            event
+                .fields
+                .get(rro_core::semconv::attr::LATENCY_MS)
+                .and_then(|v| v.as_f64()),
+        ) else {
+            return;
+        };
+        self.stages
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .push(ms);
+    }
+}
+
+impl StageCollector {
+    /// Mean ms per stage, and clear — so each arm reports only its own passes.
+    fn drain_means(&self) -> Vec<(String, f64, usize)> {
+        let mut g = self.stages.lock().unwrap();
+        let mut out: Vec<(String, f64, usize)> = g
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().sum::<f64>() / v.len() as f64, v.len()))
+            .collect();
+        g.clear();
+        // Pipeline order, not alphabetical — this is a pipeline.
+        let order = ["shape", "embed", "intent", "recall", "rerank", "reason"];
+        out.sort_by_key(|(k, _, _)| order.iter().position(|o| o == k).unwrap_or(99));
+        out
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     rro_engine::init_tracing();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run())
 }
 
+/// The collector must outlive the sink registration (`set_sink` takes a Box and
+/// the sink is global), so it lives here and both sides share it.
+static STAGES: OnceLock<Arc<StageCollector>> = OnceLock::new();
+
+/// A thin forwarder, because `set_sink` consumes a Box but we also want to read
+/// the collected timings back out.
+struct SinkHandle(Arc<StageCollector>);
+impl EventSink for SinkHandle {
+    fn record(&self, event: Event) {
+        self.0.record(event)
+    }
+}
+
 async fn run() -> anyhow::Result<()> {
+    let collector = STAGES
+        .get_or_init(|| Arc::new(StageCollector::default()))
+        .clone();
+    rro_core::events::set_sink(Box::new(SinkHandle(collector.clone())));
+
     let dir: PathBuf = std::env::var("RRO_EVAL_DATA")
         .unwrap_or_else(|_| "eval-data/nfcorpus".to_string())
         .into();
@@ -103,9 +179,33 @@ async fn run() -> anyhow::Result<()> {
 
     // ---- index ------------------------------------------------------------
     let estate_dir = tempfile::tempdir()?;
-    let estate = Arc::new(connxism::Estate::open(
+    // THE ANALYZER IS NOT A DETAIL. `Analyzer::default()` is the LEGACY pipeline
+    // — word tokens, lowercased, stopword-filtered, and UNSTEMMED. Running the
+    // lexical arm unstemmed on morphology-heavy text (nfcorpus is biomedical:
+    // statin/statins, cancer/cancers, treat/treating) cripples BM25, and then
+    // fusing that crippled ranking into a strong dense one looks exactly like
+    // "fusion hurts" — a missed optimization wearing a regression's clothes.
+    // Default to stemming here and make it switchable, so the claim is testable
+    // rather than an artifact of a default nobody looked at.
+    let analyzer = match std::env::var("RRO_EVAL_ANALYZER").as_deref() {
+        Ok("legacy") => rro_core::text::Analyzer::default(),
+        _ => rro_core::text::Analyzer::stemming(),
+    };
+    println!(
+        "analyzer: {} (RRO_EVAL_ANALYZER=legacy|stemming)",
+        if analyzer.stem {
+            "stemming"
+        } else {
+            "legacy/unstemmed"
+        }
+    );
+    let estate = Arc::new(connxism::Estate::open_with(
         estate_dir.path().to_str().unwrap(),
         "eval",
+        connxism::EstateConfig {
+            analyzer,
+            ..Default::default()
+        },
     )?);
     let recall = estate.recall();
 
@@ -119,6 +219,21 @@ async fn run() -> anyhow::Result<()> {
         docs.len() as f64 / embed_secs
     );
 
+    // RRO_EVAL_EXPORT_VECTORS: dump the REAL embeddings we just paid for, so the
+    // ANN ef sweep (crates/recall/tests/real_vector_ef.rs) can re-tune against
+    // real vectors without re-running the model.
+    if let Ok(path) = std::env::var("RRO_EVAL_EXPORT_VECTORS") {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        for (d, e) in docs.iter().zip(embeddings.iter()) {
+            let line = serde_json::json!({
+                "kind": "doc", "id": d.id.as_str(), "vector": e.0,
+            });
+            writeln!(f, "{line}")?;
+        }
+        println!("exported {} real vectors -> {path}", docs.len());
+    }
+
     let records: Vec<VectorRecord> = docs
         .iter()
         .zip(embeddings)
@@ -128,17 +243,57 @@ async fn run() -> anyhow::Result<()> {
     recall.upsert(records).await?;
     println!("indexed in {:.1}s", t.elapsed().as_secs_f64());
 
+    // ---- the full engine, for the `rro` arm -------------------------------
+    // The lower rungs call the estate directly (that IS what they are: raw
+    // retrieval). The `rro` rung must be the REAL pass — RRD gate -> embed ->
+    // intent -> recall -> rerank -> classify -> connectome map — which
+    // `ReasonReadyObject::ask()` already composes. The previous version of this
+    // harness hand-rolled hybrid_search+rerank and called that "rro": two stages
+    // of a six-stage engine, published under the product's name.
+    let rrd = Arc::new(rrd::Rrd::new());
+    let flow = rro_engine::ReasonReadyObject::builder()
+        .rrd(rrd.clone())
+        .recall(Arc::new(estate.recall()))
+        .embedder(embedder.clone())
+        .config(rro_engine::ObjectConfig {
+            recall_k,
+            rerank_k: top_k,
+        });
+    let flow = match reranker.clone() {
+        Some(r) => flow.reranker(r).build(),
+        None => flow.build(),
+    };
+
     // ---- run the ladder ---------------------------------------------------
     // (arm name, per-query nDCG@10, recall@k, MRR, wall-seconds).
     type ArmResult<'a> = (&'a str, Vec<f64>, Vec<f64>, Vec<f64>, f64);
     let mut arms: Vec<ArmResult> = Vec::new();
     let names: Vec<&str> = if reranker.is_some() {
-        vec!["bm25", "dense", "hybrid", "rro"]
+        vec!["bm25", "dense", "hybrid", "hybrid+rerank", "rro"]
     } else {
-        vec!["bm25", "dense", "hybrid"]
+        vec!["bm25", "dense", "hybrid", "rro"]
     };
+    let mut names: Vec<String> = names.into_iter().map(String::from).collect();
 
-    for arm in names {
+    // The fusion weight sweep. Fusion is query-time only, so every one of these
+    // arms reuses the single (expensive) embed+index pass above — the sweep costs
+    // milliseconds, not another model run per weight.
+    //
+    // This exists because `hybrid` scoring BELOW `dense` was nearly published as
+    // "fusion hurts". Unweighted RRF gives a 0.3283 retriever exactly the same
+    // vote as a 0.4119 one; the honest question is not "does fusion hurt" but
+    // "at what weight does it help, and does it EVER beat dense". The sweep is
+    // what makes that answerable instead of arguable.
+    let sweep: Vec<f32> = std::env::var("RRO_EVAL_SWEEP")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    for w in &sweep {
+        names.push(format!("hybrid:w{w}"));
+    }
+
+    for arm in &names {
+        let arm = arm.as_str();
         let mut ndcg = Vec::new();
         let mut rec = Vec::new();
         let mut mrr = Vec::new();
@@ -146,8 +301,13 @@ async fn run() -> anyhow::Result<()> {
         let t = Instant::now();
 
         for q in &queries {
-            // Queries take the instruction-prefixed path; documents did not.
-            let qv = embedder.embed_query_one(&q.text).await?;
+            // The `rro` arm embeds inside ask(); embedding here too would pay the
+            // model cost twice and misattribute it.
+            let qv = if arm == "rro" {
+                rro_core::Embedding(Vec::new())
+            } else {
+                embedder.embed_query_one(&q.text).await?
+            };
             let hits: Vec<Candidate> = match arm {
                 // TRUE lexical-only. The first version of this faked BM25 by
                 // handing hybrid_search a zero vector — but fusion still ran,
@@ -159,10 +319,31 @@ async fn run() -> anyhow::Result<()> {
                 "bm25" => recall.lexical_search(&q.text, recall_k).await?,
                 "dense" => recall.search(&qv, recall_k).await?,
                 "hybrid" => recall.hybrid_search(&q.text, &qv, recall_k).await?,
-                "rro" => {
+                // hybrid:w<D> — dense weighted D:1 against lexical, via the typed
+                // query path (fusion is a property of the query, not the estate).
+                a if a.starts_with("hybrid:w") => {
+                    let d: f32 = a.trim_start_matches("hybrid:w").parse().unwrap_or(1.0);
+                    recall
+                        .query(connxism::EstateQuery {
+                            text: Some(q.text.clone()),
+                            vector: Some(qv.clone()),
+                            top_k: recall_k,
+                            fusion: connxism::HybridWeights {
+                                dense: d,
+                                lexical: 1.0,
+                            },
+                            ..Default::default()
+                        })
+                        .await?
+                }
+                "hybrid+rerank" => {
                     let c = recall.hybrid_search(&q.text, &qv, recall_k).await?;
                     reranker.as_ref().unwrap().rerank(&q.text, c, top_k).await?
                 }
+                // The real engine: RRD gate -> embed -> intent -> recall ->
+                // rerank -> classify. Its per-stage timings are captured by the
+                // event sink, not by wall-clocking this call.
+                "rro" => flow.ask(&q.text).await?.candidates,
                 _ => unreachable!(),
             };
             let ids: Vec<&str> = hits.iter().take(top_k).map(|c| c.id.as_str()).collect();
@@ -173,6 +354,7 @@ async fn run() -> anyhow::Result<()> {
             mrr.push(mrr_at_k(&ids, &q.rels));
         }
         let secs = t.elapsed().as_secs_f64();
+        let stage_ms = collector.drain_means();
         // The mean hides everything. Show where this arm actually fails, so a
         // headline number can be argued with rather than taken on faith.
         per_query.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -181,7 +363,14 @@ async fn run() -> anyhow::Result<()> {
             .take(3)
             .map(|(id, n)| format!("{id}={n:.3}"))
             .collect();
-        println!("  {arm:<8} worst queries: {}", worst.join("  "));
+        println!("  {arm:<14} worst queries: {}", worst.join("  "));
+        if !stage_ms.is_empty() {
+            let parts: Vec<String> = stage_ms
+                .iter()
+                .map(|(k, ms, n)| format!("{k}={ms:.3}ms(n={n})"))
+                .collect();
+            println!("  {:<14} engine stages: {}", "", parts.join("  "));
+        }
         arms.push((arm, ndcg, rec, mrr, secs));
     }
 
@@ -193,7 +382,7 @@ async fn run() -> anyhow::Result<()> {
     );
     println!(
         "{:<8} {:>9} {:>10} {:>9} {:>12}",
-        "arm", "nDCG@10", "Recall@10", "MRR@10", "ms/query"
+        "arm", "nDCG@10", "Recall@10", "MRR@10", "wall ms/query"
     );
     let mut prev_ndcg = 0.0;
     for (name, ndcg, rec, mrr, secs) in &arms {
@@ -204,7 +393,7 @@ async fn run() -> anyhow::Result<()> {
             String::new()
         };
         println!(
-            "{:<8} {:>9.4} {:>10.4} {:>9.4} {:>12.1}{delta}",
+            "{:<14} {:>9.4} {:>10.4} {:>9.4} {:>14.1}{delta}",
             name,
             n,
             mean(rec),
@@ -213,7 +402,12 @@ async fn run() -> anyhow::Result<()> {
         );
         prev_ndcg = n;
     }
-    println!("\nPublished BEIR nDCG@10 for reference — BM25 ~0.325, and strong dense");
+    println!(
+        "\nNOTE: `wall ms/query` is END-TO-END and is dominated by MODEL time (an HTTP\n\
+         round-trip + a forward pass, plus rerank pairs). It is NOT engine latency —\n\
+         see the per-stage `engine stages` lines above for that (recall is sub-ms).\n"
+    );
+    println!("Published BEIR nDCG@10 for reference — BM25 ~0.325, and strong dense");
     println!("models land ~0.32-0.38 on nfcorpus. A number far above that band means");
     println!("the harness is wrong, not that the engine is magic.");
     Ok(())

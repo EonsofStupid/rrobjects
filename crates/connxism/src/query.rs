@@ -7,7 +7,7 @@
 //! (over-fetch + hydrate + retain) otherwise. Facets, filtered counts, and
 //! cursor-paged **scroll** live beside it on the estate.
 
-use rro_core::{Candidate, Embedding, EstateQuery, Metadata, Recall as _, Result};
+use rro_core::{Candidate, Embedding, EstateQuery, Metadata, Result};
 
 use crate::estate::{rocks_err, Estate};
 use crate::keys::CF_DOCS;
@@ -160,16 +160,18 @@ impl ConnXRecall {
                     }
                 }
                 _ => {
-                    self.unscoped(&text, &vector, q.vector.is_some(), fetch)
+                    self.unscoped(&text, &vector, q.vector.is_some(), fetch, q.fusion)
                         .await?
                 }
             },
             None => match (&q.using, &q.vector) {
                 // Named space: the dense ranking is exact cosine inside that
                 // space; a lexical ranking (if text) fuses in as usual.
-                (Some(space), Some(v)) => self.named_hybrid(space, &text, v, fetch).await?,
+                (Some(space), Some(v)) => {
+                    self.named_hybrid(space, &text, v, fetch, q.fusion).await?
+                }
                 _ => {
-                    self.unscoped(&text, &vector, q.vector.is_some(), fetch)
+                    self.unscoped(&text, &vector, q.vector.is_some(), fetch, q.fusion)
                         .await?
                 }
             },
@@ -194,7 +196,11 @@ impl ConnXRecall {
                             .map(|c| c.id.as_str().to_string())
                             .collect::<Vec<_>>(),
                     ];
-                    let fused = crate::index::reciprocal_rank_fusion(&lists, FUSION_RRF_K);
+                    let fused = crate::index::reciprocal_rank_fusion_weighted(
+                        &lists,
+                        &q.fusion.as_slice(),
+                        FUSION_RRF_K,
+                    );
                     let mut out = Vec::with_capacity(fetch.min(fused.len()));
                     for (id, score) in fused.into_iter().take(fetch) {
                         if let Some(doc) = self.doc(&id).await? {
@@ -313,15 +319,20 @@ impl ConnXRecall {
         .map_err(|e| rro_core::RroError::Recall(format!("join: {e}")))?
     }
 
+    /// The default retrieval path: hybrid when a vector is present, lexical
+    /// otherwise. `weights` is the query's fusion decision and must be threaded
+    /// through — this is the path almost every query takes, so a knob that
+    /// misses it is a knob that does nothing.
     async fn unscoped(
         &self,
         text: &str,
         vector: &Embedding,
         has_vector: bool,
         fetch: usize,
+        weights: rro_core::HybridWeights,
     ) -> Result<Vec<Candidate>> {
         if has_vector {
-            self.hybrid_search(text, vector, fetch).await
+            self.hybrid_weighted(text, vector, fetch, weights).await
         } else {
             self.lexical_search(text, fetch).await
         }
@@ -329,12 +340,16 @@ impl ConnXRecall {
 
     /// Dense ranking from a named space, fused with lexical when text is
     /// present, winners hydrated from the doc store.
+    /// Hybrid over a *named* vector space. `weights` is the query's fusion
+    /// decision — the named path must honour it exactly like the default path,
+    /// or `using:` would silently change how your rankings are fused.
     async fn named_hybrid(
         &self,
         space: &str,
         text: &str,
         vector: &Embedding,
         fetch: usize,
+        weights: rro_core::HybridWeights,
     ) -> Result<Vec<Candidate>> {
         let dense = self.named_search(space, vector, fetch).await?;
         let lexical = if text.is_empty() {
@@ -363,7 +378,11 @@ impl ConnXRecall {
                 .map(|c| c.id.as_str().to_string())
                 .collect::<Vec<_>>(),
         ];
-        let fused = crate::index::reciprocal_rank_fusion(&lists, FUSION_RRF_K);
+        let fused = crate::index::reciprocal_rank_fusion_weighted(
+            &lists,
+            &weights.as_slice(),
+            FUSION_RRF_K,
+        );
         let mut out = Vec::with_capacity(fetch.min(fused.len()));
         for (id, score) in fused.into_iter().take(fetch) {
             if let Some(doc) = self.doc(&id).await? {

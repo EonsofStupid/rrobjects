@@ -1,5 +1,19 @@
 # PARITY — the full union inventory
 
+> **Corrections — 2026-07-16 (verified against code, not docs).** Two rows in this
+> file were overclaims and are fixed above:
+> 1. **"DuckDB-native" event stream** → it is **JSONL**. There is no `duckdb`
+>    dependency in any manifest; `events.rs` writes a `JsonlSink` and its own
+>    comment says "DuckDB-ready" honestly. The table had inflated that to "native".
+> 2. **The `connxism::Db` seam** → **it does not exist.** No `Db` trait or enum is
+>    declared anywhere; RocksDB is used directly. The abstraction was claimed, never
+>    authored.
+>
+> Everything else marked ✅ in this file was re-verified as genuinely built with a
+> test proving it. Rows are corrected in place rather than deleted — the claim and
+> its correction are both part of the record.
+
+
 > ⚠️ **SUPERSEDED — the accuracy numbers below are SYNTHETIC.**
 > They were produced by the deterministic hash embedder scoring synthetic
 > vectors against synthetic vectors (a hash function grading itself), not by any
@@ -87,7 +101,7 @@ Method: enumerated from the reference trees (`openapi.json` paths, gRPC
 | Distributed: raft consensus, shards, replicas, transfers, recovery (`/cluster/*`) | warp-mesh scale-out | ⬜ P8 |
 | `/metrics` (prometheus), `/healthz` `/livez` `/readyz` | zero-dep ops HTTP listener (`serve_ops`, daemon: `RRO_OPS_ADDR`) — prometheus 0.0.4 gauges incl. per-collection; probes 200 (gated over a real socket) + `health` a2a verb / `Client::health` | ✅ |
 | `/issues` (self-reported problems) | `Estate::issues(threshold)` — applier backlog, dim unset, feed/doc divergence — surfaced in the `health` verb and `rro_issues_total` (gated: fires on backlog, clean when drained) | ✅ |
-| Telemetry endpoint | events/trends ✅ (DuckDB-native) | ✅ different-and-better |
+| Telemetry endpoint | events/trends ✅ (JSONL, DuckDB-**ready**) | ✅ different-and-better |
 | API keys / RBAC / JWT | capability tokens on a2a ✅ (L3 v1); RBAC/JWT 🔨 | ✅ v1 |
 | Strict mode / resource limits | `Quotas` (max_docs, max_payload_bytes, max_top_k, max_batch) — typed `RroError::Quota` at the write/query boundaries, reported in health, clean wire refusals; daemon `RRO_STRICT=1` | ✅ |
 
@@ -133,7 +147,7 @@ operate`
 ### B3. Storage & indexes
 | Capability | rrf home | Status |
 |---|---|---|
-| KV abstraction with backends: mem, rocksdb, surrealkv-class, tikv-class, indxdb (browser), FDB-class | `connxism::Db` seam (rocksdb ✅, mem 🔨 P3; distributed backends ⬜ P8) | ✅/🔨 |
+| KV abstraction with backends: mem, rocksdb, surrealkv-class, tikv-class, indxdb (browser), FDB-class | ⬜ **no seam exists** — `rocksdb::` is used directly (`store.rs`, `rels.rs`). A `Db` trait was claimed but never authored; a mem backend needs a real refactor, not a plug-in. Phase C2. | ⬜ |
 | Full-text index: analyzers (tokenizers/filters/stemmers), BM25 scoring, highlighter, offsets | postings ✅ BM25 + `Analyzer` ✅ + highlights **on candidates over the wire** (`EstateQuery.highlight` → `Candidate.highlights`, offset-exact, gated over TCP) | ✅ |
 | HNSW + DiskANN vector trees | **excised in the reference by the author's own design — replaced by Recall** | ✅ by architecture |
 | Index planner / query optimizer (streaming + legacy) | query planning in builder | 🔨 P3/P5 |
@@ -168,7 +182,7 @@ operate`
 | Connectome visual map (flow + estate) | ✅ | ✅ |
 | Warp points / layer-2 a2a (local≡remote, +3 ms measured) | ✅ TCP; MCP mesh P5 | ✅ core |
 | Griff — the operator-voice layer (plain-language nudging for non-technical operators; never silently rewards bad specs) | Clyffy-side consumer of readiness + connectome (out of this repo's scope; contract: RROs + readiness are its inputs) | ⬜ interface only |
-| DuckDB-native event stream + baseline gates | ✅ | ✅ |
+| DuckDB-**ready** JSONL event stream + baseline gates | ✅ | ✅ |
 | DevPULSE embedder/reranker/classifier | plug-points ✅, forward passes P7 | 🔨 P7 |
 | Ingestion machine w/ observable states + backpressure | ✅ | ✅ |
 

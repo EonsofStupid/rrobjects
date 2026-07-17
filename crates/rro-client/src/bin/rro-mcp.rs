@@ -23,6 +23,28 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 fn tool_list() -> serde_json::Value {
     serde_json::json!([
         {
+            "name": "rro_sql",
+            "description": "Run one RRQL statement — the Reason Ready Query Language. \
+    Reads: SELECT * [FROM collection] [WHERE ...] [LIMIT n]; conditions are \
+    `k = v`, `k IN (..)`, `k >= n`, `EXISTS(k)`, `k INSIDE RADIUS(lat,lon,m)`, \
+    `k INSIDE BOX(...)`, combined with AND / OR / NOT. Graph: RELATE a -> verb -> b; \
+    TRAVERSE a -> verb -> DEPTH n; INFO. Writes: DEFINE INDEX ON f | DEFINE ALIAS a FOR c | \
+    REMOVE ALIAS a | REMOVE COLLECTION c | UPDATE id SET k = v (merges) | \
+    UPDATE id CONTENT SET k = v (replaces) | DELETE id | DELETE PAYLOAD id [(k,..)]. \
+    Set read_only:true to refuse writes. SELECT is embedded server-side.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sql": { "type": "string", "description": "One RRQL statement." },
+                    "read_only": {
+                        "type": "boolean",
+                        "description": "Refuse any statement that mutates the estate (default false)."
+                    }
+                },
+                "required": ["sql"]
+            }
+        },
+        {
             "name": "rro_ask",
             "description": "Ask the Reason Ready engine: hybrid retrieval + rerank + readiness verdict + intent.",
             "inputSchema": {
@@ -110,6 +132,14 @@ fn tool_list() -> serde_json::Value {
 
 async fn call_tool(client: &Client, name: &str, args: &serde_json::Value) -> serde_json::Value {
     let outcome: Result<serde_json::Value, String> = match name {
+        "rro_sql" => {
+            let stmt = args.get("sql").and_then(|q| q.as_str()).unwrap_or("");
+            let read_only = args
+                .get("read_only")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            client.sql(stmt, read_only).await.map_err(|e| e.to_string())
+        }
         "rro_ask" => {
             let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
             client

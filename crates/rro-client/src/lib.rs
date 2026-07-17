@@ -337,4 +337,86 @@ impl Client {
             .ok_or_else(|| RroError::Net("recommend reply missing candidates".into()))?;
         Ok(serde_json::from_value(candidates)?)
     }
+
+    /// Run one RRQL statement.
+    ///
+    /// `SELECT` is embedded server-side, so a thin client needs no model
+    /// weights. `read_only` refuses writes at the node — a caller that pins
+    /// itself read-only cannot be tricked into a mutation by a crafted string.
+    ///
+    /// Returns the node's reply verbatim: the shape depends on the statement
+    /// (`{candidates}` for SELECT, `{kind: "defined"|"deleted"|…}` for the
+    /// rest), because flattening them into one shape would lose the only
+    /// information each carries.
+    pub async fn sql(&self, statement: &str, read_only: bool) -> Result<serde_json::Value> {
+        self.call(
+            "sql",
+            serde_json::json!({ "sql": statement, "read_only": read_only }),
+        )
+        .await
+    }
+
+    /// Discover: steer exploration by context pairs, ranking by how much each
+    /// candidate agrees with the pairs. `text` is embedded server-side.
+    pub async fn discover(
+        &self,
+        text: &str,
+        pairs: Vec<(String, String)>,
+        top_k: usize,
+    ) -> Result<Vec<Candidate>> {
+        let body = self
+            .call(
+                "discover",
+                serde_json::json!({ "text": text, "pairs": pairs, "top_k": top_k }),
+            )
+            .await?;
+        let candidates = body
+            .get("candidates")
+            .cloned()
+            .ok_or_else(|| RroError::Net("discover reply missing candidates".into()))?;
+        Ok(serde_json::from_value(candidates)?)
+    }
+
+    /// Assert one graph edge: `from -verb-> to`.
+    pub async fn relate(&self, from: &str, verb: &str, to: &str) -> Result<()> {
+        self.call(
+            "relate",
+            serde_json::json!({ "from": from, "verb": verb, "to": to }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Walk the graph from `start`, breadth-first, nearest hops first.
+    ///
+    /// `verbs` empty = follow every verb. Returns visited ids in traversal order.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn traverse(
+        &self,
+        start: Vec<String>,
+        verbs: Vec<String>,
+        outbound: bool,
+        inbound: bool,
+        depth: usize,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let body = self
+            .call(
+                "traverse",
+                serde_json::json!({
+                    "start": start,
+                    "verbs": verbs,
+                    "outbound": outbound,
+                    "inbound": inbound,
+                    "depth": depth,
+                    "limit": limit,
+                }),
+            )
+            .await?;
+        let ids = body
+            .get("ids")
+            .cloned()
+            .ok_or_else(|| RroError::Net("traverse reply missing ids".into()))?;
+        Ok(serde_json::from_value(ids)?)
+    }
 }

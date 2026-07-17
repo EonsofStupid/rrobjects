@@ -331,6 +331,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rro-core",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -1413,6 +1414,7 @@ dependencies = [
  "criterion",
  "proptest",
  "rro-core",
+ "serde_json",
  "tokio",
 ]
 
@@ -1527,6 +1529,7 @@ dependencies = [
  "rro-client",
  "rro-core",
  "rro-net",
+ "rro-ql",
  "serde",
  "serde_json",
  "tempfile",
@@ -1545,6 +1548,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rro-ql"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "rro-core",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

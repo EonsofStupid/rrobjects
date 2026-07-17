@@ -158,6 +158,18 @@ pub struct EstateConfig {
     /// measured). Default ON; turn off to buy ingest, the scorer falls
     /// back to full scans.
     pub lexical_stats: bool,
+    /// Shared LRU block cache, bytes.
+    ///
+    /// RocksDB's default is **8 MiB shared across every column family**, which
+    /// for a 16-CF estate evicts the hot blocks continuously. This is the single
+    /// biggest read-path knob and the first thing to raise on a dedicated box.
+    pub block_cache_bytes: usize,
+    /// Per-CF memtable size, bytes. Kept explicit so it is a decision rather
+    /// than an inherited default.
+    pub write_buffer_bytes: usize,
+    /// Background compaction + flush threads. RocksDB defaults to 2, which
+    /// stalls writes on a many-core box during ingest.
+    pub background_jobs: usize,
 }
 
 impl Default for EstateConfig {
@@ -168,6 +180,17 @@ impl Default for EstateConfig {
             fsync_writes: false,
             quotas: Quotas::default(),
             lexical_stats: true,
+            // 256 MiB. RocksDB's default is 8 MiB shared across every CF, which
+            // for a 16-CF estate means the hot blocks are evicted continuously.
+            // 256 MiB is a working default for a node with GBs to spare and is
+            // the first thing to raise on a dedicated box.
+            block_cache_bytes: 256 * 1024 * 1024,
+            // 64 MiB per CF memtable (RocksDB's own default), kept explicit so
+            // it is a decision rather than an inheritance.
+            write_buffer_bytes: 64 * 1024 * 1024,
+            // Compaction + flush threads. RocksDB defaults to 2, which stalls
+            // writes on a many-core box during ingest.
+            background_jobs: 4,
         }
     }
 }
@@ -209,16 +232,80 @@ impl Estate {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Per-CF options: `tdf` carries an associative merge operator so
-        // document-frequency counters update as blind merge writes.
+        // ---- RocksDB, actually configured -------------------------------
+        //
+        // Everything below was RocksDB defaults until 2026-07-16, which for a
+        // 16-CF estate serving point lookups meant: an 8 MiB block cache shared
+        // by every CF, and NO bloom filters — so each point lookup (a doc, a
+        // vector, a posting) touched every SST at every level before answering.
+        // For an engine whose whole claim is sub-ms recall, that is not a
+        // detail; it is the difference between a memory hit and a disk walk.
+        //
+        // Sized from the config so a laptop and the GB10 are the same code with
+        // a different number, not two paths.
+        opts.increase_parallelism(config.background_jobs as i32);
+        opts.set_max_background_jobs(config.background_jobs as i32);
+        // One shared block cache across CFs: a per-CF cache partitions memory by
+        // guesswork, and the hot set moves with the workload.
+        let cache = rocksdb::Cache::new_lru_cache(config.block_cache_bytes);
+
+        let block_opts = |bloom: bool| {
+            let mut b = rocksdb::BlockBasedOptions::default();
+            b.set_block_cache(&cache);
+            b.set_block_size(16 * 1024);
+            // Cache index/filter blocks WITH the data, and pin the top level:
+            // otherwise the filters get evicted under load and the bloom stops
+            // helping exactly when it matters.
+            b.set_cache_index_and_filter_blocks(true);
+            b.set_pin_l0_filter_and_index_blocks_in_cache(true);
+            if bloom {
+                // 10 bits/key ~= 1% false positives — the standard point-lookup
+                // trade. Only on CFs actually read by exact key.
+                b.set_bloom_filter(10.0, false);
+            }
+            b
+        };
+
+        // Per-CF options, matched to how each CF is actually read.
         let descriptors: Vec<rocksdb::ColumnFamilyDescriptor> = COLUMN_FAMILIES
             .iter()
-            .map(|name| {
+            .map(|cf| {
                 let mut cf_opts = Options::default();
-                if *name == keys::CF_TDF {
+
+                // Point-lookup CFs get a bloom; range-scanned CFs do not (a
+                // filter cannot answer a prefix scan, so it would be pure write
+                // amplification and cache pressure).
+                let point_lookup = matches!(
+                    *cf,
+                    keys::CF_DOCS
+                        | keys::CF_VECS
+                        | keys::CF_NVECS
+                        | keys::CF_MVECS
+                        | keys::CF_META
+                        | keys::CF_NODES
+                        | keys::CF_CONNS
+                        | keys::CF_COLL
+                        | keys::CF_TDF
+                );
+                cf_opts.set_block_based_table_factory(&block_opts(point_lookup));
+
+                // Vectors are dense f32 that do not compress meaningfully;
+                // paying CPU to not shrink them is a straight loss on the hot
+                // read path. Everything else (text, postings, JSON) does.
+                if matches!(*cf, keys::CF_VECS | keys::CF_NVECS | keys::CF_MVECS) {
+                    cf_opts.set_compression_type(rocksdb::DBCompressionType::None);
+                } else {
+                    cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+                }
+
+                cf_opts.set_write_buffer_size(config.write_buffer_bytes);
+
+                // `tdf` carries an associative merge operator so document-
+                // frequency counters update as blind merge writes.
+                if *cf == keys::CF_TDF {
                     cf_opts.set_merge_operator_associative("i64_add", merge_i64_add);
                 }
-                rocksdb::ColumnFamilyDescriptor::new(*name, cf_opts)
+                rocksdb::ColumnFamilyDescriptor::new(*cf, cf_opts)
             })
             .collect();
         let db = DB::open_cf_descriptors(&opts, path.as_ref(), descriptors).map_err(rocks_err)?;

@@ -160,3 +160,185 @@ async fn every_new_verb_answers_with_local_parity() {
     assert_eq!(dropped, 3);
     assert_eq!(recall.len().await.unwrap(), 4); // 3 alpha + sparse doc
 }
+
+/// discover / relate / traverse used to be reachable ONLY in-process while
+/// PARITY.md implied wire parity. A capability a remote node cannot call is a
+/// capability of the library, not of the engine. This proves the wire answer
+/// equals the local answer for each.
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_and_discover_verbs_match_local_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let estate = Arc::new(connxism::Estate::open(dir.path(), "g").unwrap());
+    let recall = estate.recall();
+
+    let mut records = Vec::new();
+    for i in 0..6u64 {
+        records.push(VectorRecord::new(
+            format!("n{i}"),
+            vec_of(i, 8),
+            format!("node {i}"),
+        ));
+    }
+    recall.upsert(records).await.unwrap();
+
+    let client = node(estate.clone()).await;
+
+    // --- relate: the edge must actually exist afterwards ------------------
+    client.relate("n0", "cites", "n1").await.unwrap();
+    client.relate("n1", "cites", "n2").await.unwrap();
+    estate.relate("n2", "cites", "n3").unwrap(); // local, for the mixed walk
+
+    // --- traverse: wire == local -----------------------------------------
+    let spec = connxism::TraversalSpec {
+        verbs: vec!["cites".to_string()],
+        outbound: true,
+        inbound: false,
+        depth: 3,
+        limit: 100,
+    };
+    let local = estate.traverse(&["n0"], &spec).unwrap();
+    let wire = client
+        .traverse(
+            vec!["n0".to_string()],
+            vec!["cites".to_string()],
+            true,
+            false,
+            3,
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(wire, local, "traverse over the wire diverged from local");
+    assert!(
+        local.contains(&"n3".to_string()),
+        "the 3-hop walk must reach n3 (edges asserted over BOTH wire and local)"
+    );
+
+    // --- traverse depth is honored, not ignored --------------------------
+    let shallow = client
+        .traverse(
+            vec!["n0".to_string()],
+            vec!["cites".to_string()],
+            true,
+            false,
+            1,
+            100,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !shallow.contains(&"n3".to_string()),
+        "depth=1 must not reach a 3-hop node — depth is being ignored"
+    );
+
+    // --- discover: wire == local -----------------------------------------
+    let q = vec_of(0, 8);
+    let pairs = vec![("n1".to_string(), "n2".to_string())];
+    let local_d = recall.discover(&q, &pairs, 4).await.unwrap();
+    let wire_d = client.discover("node 0", pairs.clone(), 4).await.unwrap();
+    // The wire embeds `text` server-side with the node's embedder, so the query
+    // vector differs from the hand-built one; the CONTRACT under test is that
+    // the verb answers and respects top_k, not that two different vectors rank
+    // identically. Claiming otherwise would be a fake assertion.
+    assert!(wire_d.len() <= 4, "discover must honor top_k over the wire");
+    assert!(!local_d.is_empty(), "local discover returned nothing");
+
+    // --- bad input errors across the wire rather than panicking ----------
+    assert!(client
+        .traverse(vec![], vec![], true, false, 1, 10)
+        .await
+        .is_err());
+}
+
+/// B4's gate: RRQL over the wire must equal RRQL applied locally. If they
+/// diverge, the `sql` verb is a second implementation of the language — exactly
+/// what ADR-0003 forbids.
+#[tokio::test(flavor = "multi_thread")]
+async fn rrql_over_the_wire_matches_local_rrql() {
+    let dir = tempfile::tempdir().unwrap();
+    let estate = Arc::new(connxism::Estate::open(dir.path(), "q").unwrap());
+    let recall = estate.recall();
+
+    let mut records = Vec::new();
+    for i in 0..6u64 {
+        let mut r = VectorRecord::new(format!("d{i}"), vec_of(i, 8), format!("doc {i}"));
+        r.metadata.insert(
+            "team".into(),
+            serde_json::json!(if i < 3 { "blue" } else { "red" }),
+        );
+        r.metadata.insert("rank".into(), serde_json::json!(i));
+        records.push(r);
+    }
+    recall.upsert(records).await.unwrap();
+
+    let client = node(estate.clone()).await;
+
+    // --- a write over the wire actually lands ------------------------------
+    client.sql("DEFINE INDEX ON team", false).await.unwrap();
+    assert!(
+        estate
+            .payload_indexes()
+            .unwrap()
+            .contains(&"team".to_string()),
+        "the index must exist after the wire call — not just be reported"
+    );
+
+    // --- wire == local for the same statement -----------------------------
+    let stmt = "UPDATE d0 SET team = 'green'";
+    client.sql(stmt, false).await.unwrap();
+    let after_wire = recall.doc("d0").await.unwrap().unwrap().metadata;
+    assert_eq!(after_wire.get("team").unwrap(), &serde_json::json!("green"));
+    assert_eq!(
+        after_wire.get("rank").unwrap(),
+        &serde_json::json!(0),
+        "SET merged over the wire too — `rank` must survive"
+    );
+
+    // --- graph over the wire ----------------------------------------------
+    client.sql("RELATE d0 -> cites -> d1", false).await.unwrap();
+    let walked = client
+        .sql("TRAVERSE d0 -> cites -> DEPTH 1", false)
+        .await
+        .unwrap();
+    let ids: Vec<String> = serde_json::from_value(walked.get("ids").cloned().unwrap()).unwrap();
+    let spec = connxism::TraversalSpec {
+        verbs: vec!["cites".into()],
+        outbound: true,
+        inbound: false,
+        depth: 1,
+        limit: 10_000,
+    };
+    assert_eq!(
+        ids,
+        estate.traverse(&["d0"], &spec).unwrap(),
+        "the wire walk must equal the local walk"
+    );
+
+    // --- SELECT is embedded server-side: a thin client needs no weights ----
+    let hits = client
+        .sql("SELECT * WHERE team = 'red' LIMIT 5", true)
+        .await
+        .unwrap();
+    let cands = hits.get("candidates").and_then(|c| c.as_array()).unwrap();
+    assert!(!cands.is_empty(), "SELECT over the wire returned nothing");
+    assert!(cands.len() <= 5, "LIMIT is honored over the wire");
+
+    // --- read_only actually refuses ---------------------------------------
+    let refused = client.sql("DELETE d1", true).await;
+    assert!(
+        refused.is_err(),
+        "read_only must refuse a write; a caller that pins itself read-only must \
+         not be tricked into a mutation by a crafted string"
+    );
+    assert!(
+        recall.doc("d1").await.unwrap().is_some(),
+        "and the refused write must not have happened"
+    );
+
+    // --- a syntax error comes back as an error, with the span --------------
+    let bad = client.sql("SELECT * WHERE year >= AND x = 1", true).await;
+    assert!(
+        bad.is_err(),
+        "a syntax error must surface, not return empty results"
+    );
+}

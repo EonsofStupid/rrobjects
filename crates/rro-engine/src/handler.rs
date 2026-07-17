@@ -183,6 +183,240 @@ impl Handler for FlowNode {
                 }
             }
 
+            // `sql`: one RRQL statement. Body: {"sql": "...", "read_only": bool}
+            //
+            // This is the verb that makes RRO reachable by anything that can
+            // send text — an MCP tool, a CLI, a REST body — instead of only by
+            // something that can link the crate and hand-build an EstateQuery.
+            "sql" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let Some(src) = msg.body.get("sql").and_then(|v| v.as_str()) else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "sql needs a `sql` string"
+                    }))));
+                };
+
+                let stmt = match rro_ql::parse(src) {
+                    Ok(s) => s,
+                    // The caret renders the offending line with a marker under
+                    // it. A remote caller that gets "syntax error" has to guess;
+                    // one that gets the span can fix it.
+                    Err(e) => {
+                        return Ok(Some(msg.reply(serde_json::json!({
+                            "error": e.to_string(),
+                            "detail": e.caret(src),
+                        }))))
+                    }
+                };
+
+                // A peer may pin itself read-only. Refusing a write here rather
+                // than at the estate means an exposed node can be safely shared
+                // without trusting the caller's intent.
+                let read_only = msg
+                    .body
+                    .get("read_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if read_only && stmt.is_write() {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": format!(
+                            "{} is a write and this request set read_only",
+                            stmt.keyword()
+                        )
+                    }))));
+                }
+
+                // SELECT needs the flow (it must embed the query text); every
+                // other statement is an estate op.
+                if let rro_ql::Statement::Select(_) = stmt {
+                    let q = match rro_ql::parse_query(src) {
+                        Ok(q) => q,
+                        Err(e) => {
+                            return Ok(Some(
+                                msg.reply(serde_json::json!({ "error": e.to_string() })),
+                            ))
+                        }
+                    };
+                    let text = q.text.clone().unwrap_or_default();
+                    let vector = match self.flow.embed_query(&text).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Ok(Some(
+                                msg.reply(serde_json::json!({ "error": e.to_string() })),
+                            ))
+                        }
+                    };
+                    let mut q = q;
+                    q.vector = Some(vector);
+                    return match estate.recall().query(q).await {
+                        Ok(candidates) => Ok(Some(msg.reply(
+                            serde_json::json!({ "kind": "query", "candidates": candidates }),
+                        ))),
+                        Err(e) => Ok(Some(
+                            msg.reply(serde_json::json!({ "error": e.to_string() })),
+                        )),
+                    };
+                }
+
+                match crate::sql::apply(estate, stmt).await {
+                    Ok(outcome) => Ok(Some(msg.reply(serde_json::json!(outcome)))),
+                    Err(e) => Ok(Some(
+                        msg.reply(serde_json::json!({ "error": e.to_string() })),
+                    )),
+                }
+            }
+
+            // `discover`: context-pair steered exploration.
+            // Body: {"text": "...", "pairs": [["a","b"], ...], "top_k": 10}
+            //
+            // discover/relate/traverse were reachable ONLY in-process while
+            // PARITY.md implied wire parity. A capability a remote node cannot
+            // call is not a capability of the engine, it is a capability of the
+            // library.
+            "discover" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let Some(text) = msg.body.get("text").and_then(|v| v.as_str()) else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "discover needs `text`"
+                    }))));
+                };
+                let pairs: Vec<(String, String)> = msg
+                    .body
+                    .get("pairs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|p| {
+                                let p = p.as_array()?;
+                                Some((
+                                    p.first()?.as_str()?.to_string(),
+                                    p.get(1)?.as_str()?.to_string(),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let top_k = msg
+                    .body
+                    .get("top_k")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10)
+                    .min(1024) as usize;
+                let q = match self.flow.embed_query(text).await {
+                    Ok(q) => q,
+                    Err(e) => {
+                        return Ok(Some(
+                            msg.reply(serde_json::json!({ "error": e.to_string() })),
+                        ))
+                    }
+                };
+                match estate.recall().discover(&q, &pairs, top_k).await {
+                    Ok(candidates) => Ok(Some(
+                        msg.reply(serde_json::json!({ "candidates": candidates })),
+                    )),
+                    Err(e) => Ok(Some(
+                        msg.reply(serde_json::json!({ "error": e.to_string() })),
+                    )),
+                }
+            }
+
+            // `relate`: assert one graph edge. Body: {"from","verb","to"}
+            "relate" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let s = |k: &str| msg.body.get(k).and_then(|v| v.as_str());
+                let (Some(from), Some(verb), Some(to)) = (s("from"), s("verb"), s("to")) else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "relate needs `from`, `verb`, `to`"
+                    }))));
+                };
+                match estate.relate(from, verb, to) {
+                    Ok(()) => Ok(Some(msg.reply(serde_json::json!({ "related": true })))),
+                    Err(e) => Ok(Some(
+                        msg.reply(serde_json::json!({ "error": e.to_string() })),
+                    )),
+                }
+            }
+
+            // `traverse`: walk the graph from a start set.
+            // Body: {"start": ["id"], "verbs": [..], "outbound": true,
+            //        "inbound": false, "depth": 2, "limit": 100}
+            "traverse" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let start: Vec<String> = msg
+                    .body
+                    .get("start")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if start.is_empty() {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "traverse needs a non-empty `start`"
+                    }))));
+                }
+                let default = connxism::TraversalSpec::default();
+                let spec = connxism::TraversalSpec {
+                    verbs: msg
+                        .body
+                        .get("verbs")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    outbound: msg
+                        .body
+                        .get("outbound")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(default.outbound),
+                    inbound: msg
+                        .body
+                        .get("inbound")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(default.inbound),
+                    depth: msg
+                        .body
+                        .get("depth")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default.depth as u64)
+                        .min(64) as usize,
+                    limit: msg
+                        .body
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default.limit as u64)
+                        .min(10_000) as usize,
+                };
+                let refs: Vec<&str> = start.iter().map(String::as_str).collect();
+                match estate.traverse(&refs, &spec) {
+                    Ok(ids) => Ok(Some(msg.reply(serde_json::json!({ "ids": ids })))),
+                    Err(e) => Ok(Some(
+                        msg.reply(serde_json::json!({ "error": e.to_string() })),
+                    )),
+                }
+            }
+
             // `index`: ingest a batch of documents over a2a.
             // Body: {"docs": [{"id": "...", "text": "..."}, ...]}
             "index" => {

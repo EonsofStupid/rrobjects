@@ -17,7 +17,10 @@ use rro_core::{Candidate, Embedding, Id, Recall, Result, RroError, VectorRecord}
 use tokio::sync::Mutex;
 
 use crate::estate::{rocks_err, Db, Estate};
-use crate::index::{bm25_scores, reciprocal_rank_fusion, Bm25Params, Posting, Postings};
+use crate::index::{
+    bm25_scores, reciprocal_rank_fusion, reciprocal_rank_fusion_weighted, Bm25Params, Posting,
+    Postings,
+};
 use crate::keys::{
     self, CF_DOCS, CF_FEED, CF_META, CF_PIDX, CF_TERMS, CF_VECS, META_DOC_COUNT, META_ESTATE,
     META_FEED_SEQ, META_SHAPES, META_TOTAL_TOKENS,
@@ -70,6 +73,68 @@ impl Estate {
 }
 
 impl ConnXRecall {
+    /// Hybrid dense+lexical recall, fusing with explicit per-arm `weights`.
+    ///
+    /// This is the real implementation; the [`Recall::hybrid_search`] trait
+    /// method delegates here with plain 1:1 weights. The split exists because
+    /// the trait is a narrow port with no query object, while fusion is a
+    /// per-query decision — see [`rro_core::EstateQuery::fusion`].
+    pub async fn hybrid_weighted(
+        &self,
+        query_text: &str,
+        query: &Embedding,
+        top_k: usize,
+        weights: rro_core::HybridWeights,
+    ) -> Result<Vec<Candidate>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let ann = self.ann.clone();
+        let pending = self.pending.clone();
+        let params = self.params;
+        let weights = weights.as_slice();
+        let q = query.clone();
+        let terms = self.analyzer.analyze(query_text);
+        let depth = top_k.saturating_mul(FUSION_DEPTH_FACTOR).max(top_k);
+        let rescore = self.rescore;
+
+        tokio::task::spawn_blocking(move || {
+            // Two rankings over the same estate…
+            let dense = dense_blocking(&db, &ann, &pending, &q, depth, false, rescore)?;
+            let lexical = if terms.is_empty() {
+                Vec::new()
+            } else {
+                lexical_topk_blocking(&db, params, &terms, depth)?
+            };
+
+            // …fused by reciprocal rank fusion.
+            let lists = [
+                dense
+                    .iter()
+                    .map(|c| c.id.as_str().to_string())
+                    .collect::<Vec<_>>(),
+                lexical
+                    .iter()
+                    .map(|c| c.id.as_str().to_string())
+                    .collect::<Vec<_>>(),
+            ];
+            let fused = reciprocal_rank_fusion_weighted(&lists, &weights, RRF_K);
+
+            let mut out = Vec::with_capacity(top_k);
+            for (doc_id, score) in fused.into_iter().take(top_k) {
+                if let Some(doc) = db.get_json::<StoredDoc>(CF_DOCS, doc_id.as_bytes())? {
+                    let mut c = Candidate::new(doc.id, doc.text, score);
+                    c.metadata = doc.metadata;
+                    out.push(c);
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| RroError::Recall(format!("join: {e}")))?
+    }
+
     /// Fetch a stored document by id.
     pub async fn doc(&self, id: &str) -> Result<Option<StoredDoc>> {
         let db = self.db.clone();
@@ -450,52 +515,11 @@ impl Recall for ConnXRecall {
         query: &Embedding,
         top_k: usize,
     ) -> Result<Vec<Candidate>> {
-        if top_k == 0 {
-            return Ok(Vec::new());
-        }
-        let db = self.db.clone();
-        let ann = self.ann.clone();
-        let pending = self.pending.clone();
-        let params = self.params;
-        let q = query.clone();
-        let terms = self.analyzer.analyze(query_text);
-        let depth = top_k.saturating_mul(FUSION_DEPTH_FACTOR).max(top_k);
-        let rescore = self.rescore;
-
-        tokio::task::spawn_blocking(move || {
-            // Two rankings over the same estate…
-            let dense = dense_blocking(&db, &ann, &pending, &q, depth, false, rescore)?;
-            let lexical = if terms.is_empty() {
-                Vec::new()
-            } else {
-                lexical_topk_blocking(&db, params, &terms, depth)?
-            };
-
-            // …fused by reciprocal rank fusion.
-            let lists = [
-                dense
-                    .iter()
-                    .map(|c| c.id.as_str().to_string())
-                    .collect::<Vec<_>>(),
-                lexical
-                    .iter()
-                    .map(|c| c.id.as_str().to_string())
-                    .collect::<Vec<_>>(),
-            ];
-            let fused = reciprocal_rank_fusion(&lists, RRF_K);
-
-            let mut out = Vec::with_capacity(top_k);
-            for (doc_id, score) in fused.into_iter().take(top_k) {
-                if let Some(doc) = db.get_json::<StoredDoc>(CF_DOCS, doc_id.as_bytes())? {
-                    let mut c = Candidate::new(doc.id, doc.text, score);
-                    c.metadata = doc.metadata;
-                    out.push(c);
-                }
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| RroError::Recall(format!("join: {e}")))?
+        // The port carries no query, so it fuses 1:1 (plain RRF). Callers that
+        // have an EstateQuery go through `hybrid_weighted` and honour its
+        // `fusion` weights.
+        self.hybrid_weighted(query_text, query, top_k, rro_core::HybridWeights::default())
+            .await
     }
 
     async fn len(&self) -> Result<usize> {

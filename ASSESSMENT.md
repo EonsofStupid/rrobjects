@@ -1,5 +1,21 @@
 # Honest assessment — is this useful, or start over?
 
+> **Superseded in part — 2026-07-16.** This document was written before P7 landed
+> and now **UNDER-claims**. Corrections:
+> - *"the real embedder/reranker was never built… a stub"* — **no longer true.**
+>   `crates/embedder/src/candle_qwen/` is a real, hand-written, cache-free Qwen3
+>   encoder that reproduces the model card's published scores to ~6 decimals, and
+>   agrees with vLLM **elementwise (cosine 0.9999)** on identical weights.
+>   `crates/reranker/` has candle + llama.cpp + vLLM cross-encoders.
+> - *"this container 403-blocks HF… it must move"* — done; the work is on the box.
+> - *"mean-pool"* (§"The actual next step") is **WRONG for this model**:
+>   `1_Pooling/config.json` says `pooling_mode_lasttoken: true`. Mean-pooling would
+>   silently degrade every vector. See `crates/embedder/src/candle_qwen/mod.rs`.
+>
+> What still stands, and is the reason this doc was right to be blunt: every
+> accuracy number predating `docs/BENCHMARKS_REAL.md` was synthetic.
+
+
 _Authored 2026-07-16. Blunt, not a pitch._
 
 ## The one thing you asked for first was never done

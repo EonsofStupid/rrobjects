@@ -6,11 +6,21 @@
 # elementwise" (measured: cosine 0.9999 across docs and queries). Point this at a
 # different checkpoint and that cross-check silently stops meaning anything.
 #
-# Install (rootless):
+# ⚠️ DO NOT leave this running on a shared box. Start it for the cross-check,
+# then STOP it. Measured 2026-07-16: this unit held 11.6 GiB while the brain
+# (:8091) held 40.8 GiB and the vLLM reranker (:8092) held 12.9 GiB — ~80 GiB of
+# the GB10's 121.63 GiB. That pressure SIGKILL'd the llama.cpp embedder on :8090
+# mid-benchmark (`code=killed, status=9/KILL`) and destroyed a 6-minute run.
+# Check headroom first:
+#   nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv
+#
+# Install (rootless), deliberately and temporarily:
 #   cp deploy/rro-embed-vllm.container ~/.config/containers/systemd/
 #   systemctl --user daemon-reload
 #   systemctl --user start rro-embed-vllm
 #   curl -s localhost:8096/v1/models
+#   # ... run the cross-check ...
+#   systemctl --user stop rro-embed-vllm    # <- do not skip this
 #
 # Verify the generator is happy before starting:
 #   /usr/libexec/podman/quadlet -dryrun -user

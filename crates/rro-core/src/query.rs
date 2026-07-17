@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Embedding, Metadata, SparseVector};
 
 /// One testable condition over a metadata field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Condition {
     /// The field equals this value exactly.
@@ -258,7 +258,7 @@ impl Condition {
 
 /// A boolean combination of [`Condition`]s: every `must` holds, at least one
 /// `should` holds (when any are given), no `must_not` holds.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filter {
     /// Every condition must hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -332,6 +332,47 @@ pub struct Prefetch {
     pub limit: usize,
 }
 
+/// How much say each retriever gets in hybrid fusion.
+///
+/// Plain RRF is this struct at 1:1 — an assumption that dense and lexical
+/// retrieval are equally trustworthy on your corpus. They usually are not, and
+/// the equal-vote default is what makes fused results score *below* the better
+/// arm alone: a lexical-only hit at rank 1 contributes `1/(60+1)` and outranks a
+/// dense hit at rank 2 at `1/(60+2)`, so the weaker retriever outvotes the
+/// stronger one on its own turf.
+///
+/// This lives on the **query**, not on the estate: the right weight is a
+/// property of what is being asked, not of what is stored. "Find `E0521`" wants
+/// the lexical arm; "why does fusion regress" does not. Measured on nfcorpus,
+/// the best lexical weight is ~0 — see `docs/BENCHMARKS_REAL.md` Finding 1.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HybridWeights {
+    /// Vote scale for the dense (vector) ranking.
+    pub dense: f32,
+    /// Vote scale for the lexical (BM25) ranking.
+    pub lexical: f32,
+}
+
+impl Default for HybridWeights {
+    /// 1:1 — identical to plain RRF, so this knob changes nobody's results
+    /// until they ask it to. Deliberately **not** a value tuned on a benchmark:
+    /// baking in one corpus's answer is overfitting shipped as a default.
+    fn default() -> Self {
+        HybridWeights {
+            dense: 1.0,
+            lexical: 1.0,
+        }
+    }
+}
+
+impl HybridWeights {
+    /// As the `[dense, lexical]` vector the fusion takes — the order both
+    /// fusion call sites build their lists in.
+    pub fn as_slice(self) -> [f32; 2] {
+        [self.dense, self.lexical]
+    }
+}
+
 /// A typed retrieval request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EstateQuery {
@@ -387,6 +428,10 @@ pub struct EstateQuery {
     /// the outer query rescores exactly inside their union.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefetch: Vec<Prefetch>,
+    /// How much say each retriever gets when the dense and lexical rankings are
+    /// fused. Defaults to 1:1 (plain RRF).
+    #[serde(default)]
+    pub fusion: HybridWeights,
 }
 
 impl Default for EstateQuery {
@@ -408,6 +453,7 @@ impl Default for EstateQuery {
             with_vectors: false,
             highlight: false,
             prefetch: Vec::new(),
+            fusion: HybridWeights::default(),
         }
     }
 }

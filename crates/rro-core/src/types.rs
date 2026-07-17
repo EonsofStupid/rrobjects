@@ -358,4 +358,16 @@ pub struct RecallResult {
     /// Intent tags routed by RRD at the front door (empty without RRD).
     #[serde(default)]
     pub intent: Vec<String>,
+    /// The turn this result came from — the id every signal of this pass was
+    /// emitted under.
+    ///
+    /// Without it the engine mints a turn id, tags every event with it, and
+    /// never tells the caller which one was theirs: you get results and you get
+    /// events, with no way to join them. Anything that replays a session, or
+    /// asks "which stage made *this* answer slow", needs this field. Its
+    /// absence is also what made the turn tests race — they had to guess by
+    /// taking the newest turn in the stream, which is wrong the moment two
+    /// queries overlap.
+    #[serde(default)]
+    pub turn: crate::TurnId,
 }

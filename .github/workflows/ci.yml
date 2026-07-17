@@ -43,9 +43,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --all-features
+      # `--profile ci` is not cosmetic: without it `.config/nextest.toml`'s
+      # `[profile.ci]` never applies, so the JUnit report is never written and
+      # the flaky-test reporting it configures has never once run. A test that
+      # failed 7 runs in 100 lived in this tree undetected because of it.
+      - run: cargo nextest run --profile ci --workspace --all-features
       - name: doctests
         run: cargo test --workspace --doc --all-features
+      - name: test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   msrv:
     name: msrv (1.90)
