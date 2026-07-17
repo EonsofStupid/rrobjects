@@ -1550,6 +1550,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rro-ql"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "rro-core",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

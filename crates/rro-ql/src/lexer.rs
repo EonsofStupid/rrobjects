@@ -162,9 +162,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
 
         let start = i;
 
-        // two-char operators first, so `<=` never lexes as `<` then `=`
-        if i + 1 < b.len() {
-            let two = &src[i..i + 2];
+        // Two-char operators first, so `<=` never lexes as `<` then `=`.
+        //
+        // `src.get(i..i+2)` and NOT `&src[i..i+2]`: the latter panics when i+2
+        // lands inside a multibyte char, so a single `Ѩ` anywhere outside a
+        // string would crash the process. On a query surface that is a remote
+        // denial-of-service — found by the `arbitrary_input_never_panics`
+        // property, not by any example test (the unicode example only covered
+        // unicode INSIDE strings, which takes the char-safe path).
+        if let Some(two) = src.get(i..i + 2) {
             let kind = match two {
                 "!=" => Some(TokenKind::Neq),
                 "<=" => Some(TokenKind::Lte),
@@ -408,6 +414,25 @@ mod tests {
         let toks = lex("SELECT * WHERE a = 1").unwrap();
         let (s, e) = toks[3].span; // `a`
         assert_eq!(&"SELECT * WHERE a = 1"[s..e], "a");
+    }
+
+    /// REGRESSION: a bare multibyte char outside a string used to PANIC —
+    /// `&src[i..i+2]` in the two-char-operator check split it. On a query
+    /// surface that is a remote DoS: one `Ѩ` kills the node. Found by the
+    /// `arbitrary_input_never_panics` property, not by an example.
+    #[test]
+    fn a_bare_multibyte_char_errors_instead_of_panicking() {
+        for src in ["Ѩ", "a Ѩ b", "SELECT * WHERE Ѩ = 1", "→", "世界"] {
+            let r = lex(src);
+            assert!(r.is_err(), "{src:?} should be a lex error, not a panic or a token");
+        }
+    }
+
+    #[test]
+    fn multibyte_right_before_a_real_two_char_operator_still_lexes() {
+        // The fix must not break the operator it guards.
+        let toks = lex("'é' <= 3").unwrap();
+        assert_eq!(toks[1].kind, TokenKind::Lte);
     }
 
     #[test]

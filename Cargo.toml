@@ -12,6 +12,7 @@ members = [
     "crates/connxism",
     "crates/rrd",
     "crates/rro-net",
+    "crates/rro-ql",
     "crates/rro-client",
     "crates/rro-engine",
 ]
@@ -39,6 +40,7 @@ connectors = { path = "crates/connectors" }
 connxism = { path = "crates/connxism" }
 rrd = { path = "crates/rrd" }
 rro-net = { path = "crates/rro-net" }
+rro-ql = { path = "crates/rro-ql" }
 rro-client = { path = "crates/rro-client" }
 rro-engine = { path = "crates/rro-engine" }
 

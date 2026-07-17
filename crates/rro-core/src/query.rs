@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Embedding, Metadata, SparseVector};
 
 /// One testable condition over a metadata field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Condition {
     /// The field equals this value exactly.
@@ -258,7 +258,7 @@ impl Condition {
 
 /// A boolean combination of [`Condition`]s: every `must` holds, at least one
 /// `should` holds (when any are given), no `must_not` holds.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filter {
     /// Every condition must hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
