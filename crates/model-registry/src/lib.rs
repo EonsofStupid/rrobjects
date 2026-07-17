@@ -126,8 +126,16 @@ impl std::str::FromStr for EmbedderKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RerankerKind {
     /// BM25 lexical scoring. Weightless; the default.
+    ///
+    /// Sharp edge: it re-sorts *lexically*. Over a hybrid store — whose fusion
+    /// already weighed BM25 once — it double-counts the lexical signal and
+    /// re-sorts by the weaker retriever. Right for a dense-only store that wants
+    /// lexical signal added; wrong as a reranker you forgot to configure.
     #[default]
     Lexical,
+    /// Keep recall's ordering; take the top k. Weightless, free, and the only
+    /// way to say "do not rerank" — the stage cannot be omitted, only filled.
+    Identity,
     /// Cross-encoder (query,doc)->score via candle. Requires `candle` + weights.
     CandleCrossEncoder,
     /// llama.cpp `--reranking` server (`/v1/rerank`).
@@ -145,6 +153,7 @@ impl RerankerKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             RerankerKind::Lexical => "lexical",
+            RerankerKind::Identity => "identity",
             RerankerKind::CandleCrossEncoder => "candle-cross-encoder",
             RerankerKind::LlamaCpp => "llamacpp",
             RerankerKind::Vllm => "vllm",
@@ -154,8 +163,9 @@ impl RerankerKind {
     }
 
     /// Every selectable kind.
-    pub const ALL: [RerankerKind; 6] = [
+    pub const ALL: [RerankerKind; 7] = [
         RerankerKind::Lexical,
+        RerankerKind::Identity,
         RerankerKind::CandleCrossEncoder,
         RerankerKind::LlamaCpp,
         RerankerKind::Vllm,
@@ -170,6 +180,7 @@ impl std::str::FromStr for RerankerKind {
     fn from_str(s: &str) -> Result<Self> {
         match normalize(s).as_str() {
             "lexical" | "bm25" => Ok(RerankerKind::Lexical),
+            "identity" | "none" => Ok(RerankerKind::Identity),
             "candle-cross-encoder" | "candle-nemotron" | "candle-qwen" | "candle" => {
                 Ok(RerankerKind::CandleCrossEncoder)
             }
@@ -367,6 +378,7 @@ pub async fn build_embedder(cfg: &EmbedderConfig) -> Result<Arc<dyn Embedder>> {
 pub async fn build_reranker(cfg: &RerankerConfig) -> Result<Arc<dyn Reranker>> {
     match cfg.kind {
         RerankerKind::Lexical => Ok(Arc::new(reranker::LexicalReranker::new())),
+        RerankerKind::Identity => Ok(Arc::new(reranker::IdentityReranker::new())),
 
         RerankerKind::CandleCrossEncoder => {
             #[cfg(feature = "candle")]

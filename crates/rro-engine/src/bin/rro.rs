@@ -94,8 +94,25 @@ async fn main() -> anyhow::Result<()> {
             .reranker(reranker.clone())
             .build(),
     };
-    let n = flow.index(sample_corpus()).await?;
-    tracing::info!(indexed = n, "seeded sample corpus");
+    // Seed the demo corpus ONLY into a throwaway in-memory node.
+    //
+    // This used to run unconditionally, outside the match — so every start of a
+    // daemon with `RRO_ESTATE` set wrote six documents about banana bread and
+    // Postgres upgrades into the operator's durable memory, and did it again on
+    // every restart. For a product whose entire promise is "your AI remembers",
+    // silently injecting demo data into that memory is about the worst possible
+    // default. Observed live: a real recall returned `d5` (a2a protocols) over
+    // the document that actually answered the question.
+    //
+    // An estate is the user's. We do not put anything in it that the user did
+    // not put in it.
+    if estate_handle.is_none() {
+        let n = flow.index(sample_corpus()).await?;
+        tracing::info!(
+            indexed = n,
+            "in-memory node: seeded the demo corpus (set RRO_ESTATE for a real, unseeded estate)"
+        );
+    }
 
     let opts = ServeOptions {
         node_id: std::env::var("RRO_NODE").unwrap_or_else(|_| "rro".to_string()),

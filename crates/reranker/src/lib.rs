@@ -3,6 +3,9 @@
 //! True-relevance ordering over recall candidates, behind the
 //! [`rro_core::Reranker`] trait.
 //!
+//! - [`IdentityReranker`] — keeps recall's ordering, takes the top k. "No
+//!   rerank" has to be a reranker, because the stage cannot be omitted; until
+//!   this existed, a caller who trusted their recall order had no way to say so.
 //! - [`LexicalReranker`] — weightless Okapi BM25. The default, and a sharp edge:
 //!   it re-sorts candidates *lexically*, so handing it a strong dense ranking
 //!   drags that ranking back toward BM25. Measured: it took the full pass from
@@ -23,11 +26,13 @@ mod bm25;
 #[cfg(feature = "candle")]
 mod candle_qwen;
 mod http;
+mod identity;
 
 pub use bm25::LexicalReranker;
 #[cfg(feature = "candle")]
 pub use candle_qwen::{CandleQwenReranker, CandleRerankConfig, DEFAULT_RERANK_TASK};
 pub use http::{HttpRerankConfig, HttpRerankKind, HttpReranker};
+pub use identity::IdentityReranker;
 
 /// Re-export so downstream crates can name the trait without a second dep.
 pub use rro_core::Reranker;
