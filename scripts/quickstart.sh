@@ -11,18 +11,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${RRF_HOME:-$ROOT/.rrf}"
+RUN_DIR="${RRO_HOME:-$ROOT/.rro}"
 ESTATE="$RUN_DIR/estate"
 EVENTS="$RUN_DIR/events.jsonl"
-PIDFILE="$RUN_DIR/rrf.pid"
+PIDFILE="$RUN_DIR/rro.pid"
 ADDR="${RRO_LISTEN:-127.0.0.1:7878}"
 
 stop() {
   if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill -TERM "$(cat "$PIDFILE")" && sleep 1
-    echo "stopped rrf (pid $(cat "$PIDFILE"))"
+    echo "stopped rro (pid $(cat "$PIDFILE"))"
   else
-    echo "no running rrf daemon found"
+    echo "no running rro daemon found"
   fi
   rm -f "$PIDFILE"
 }

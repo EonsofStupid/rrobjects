@@ -15,7 +15,9 @@ Cargo.lock.bak
 .vscode/
 *.swp
 
-# Runtime estate + event stream (was committed by accident as .rrf/)
+# Runtime estate + event stream (.rrf/ was committed by accident once —
+# 1.9 MB of RocksDB logs. Both names stay ignored so a stale checkout
+# that still writes .rrf/ cannot repeat it.)
 /.rro/
 /.rrf/
 *.jsonl.tmp

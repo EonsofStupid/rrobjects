@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${RRF_HOME:-$ROOT/.rrf}/mesh"
+RUN_DIR="${RRO_HOME:-$ROOT/.rro}/mesh"
 BASE_PORT=7901
 N="${1:-3}"
 
@@ -32,7 +32,7 @@ cargo build --release --bin rro --bin rro-bench >/dev/null
 echo "── booting a ${N}-node mesh ───────────────────────────────────"
 for i in $(seq 1 "$N"); do
   port=$((BASE_PORT + i - 1))
-  RRO_NODE="rrf-n$i" RRO_ESTATE="$RUN_DIR/estate-$i" \
+  RRO_NODE="rro-n$i" RRO_ESTATE="$RUN_DIR/estate-$i" \
   RRO_LISTEN="127.0.0.1:$port" RRO_EVENTS="$RUN_DIR/node-$i.events.jsonl" \
   RUST_LOG=warn "$ROOT/target/release/rro" >>"$RUN_DIR/node-$i.log" 2>&1 &
   echo $! > "$RUN_DIR/node-$i.pid"
@@ -44,7 +44,7 @@ for i in $(seq 1 "$N"); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then exec 3>&-; break; fi
     sleep 0.2
   done
-  echo "node rrf-n$i up — warp point tcp://127.0.0.1:$port"
+  echo "node rro-n$i up — warp point tcp://127.0.0.1:$port"
 done
 
 echo "── smoke: full pipeline against every node over a2a ───────────"
@@ -52,7 +52,7 @@ for i in $(seq 1 "$N"); do
   port=$((BASE_PORT + i - 1))
   acc=$("$ROOT/target/release/rro-bench" --docs 200 --queries 10 --store estate \
         --remote "127.0.0.1:$port" 2>/dev/null | grep -oE 'accuracy@10 \(golden retrieved\)\*\* \| \*\*[0-9.]+' | grep -oE '[0-9.]+$' || echo "?")
-  echo "  rrf-n$i (127.0.0.1:$port): accuracy@10 = $acc"
+  echo "  rro-n$i (127.0.0.1:$port): accuracy@10 = $acc"
 done
 
 echo
