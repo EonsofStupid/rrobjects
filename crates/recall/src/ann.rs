@@ -92,7 +92,7 @@ impl<T: bytemuck::Pod> PagedBase<T> {
     }
 
     /// Run `f` with node `node`'s vector, holding the page live for the call.
-    #[inline]
+    #[inline(always)]
     fn with<R>(&self, node: usize, f: impl FnOnce(&[T]) -> R) -> R {
         let page_idx = node / self.per_page;
         let within = node % self.per_page;
@@ -226,15 +226,22 @@ impl<T: bytemuck::Pod> MappedVec<T> {
     /// Run `f` with node `node`'s `unit`-element vector. For a base node the page
     /// is held live for the duration of the call (the borrow never escapes the
     /// cache); for a tail node it borrows the heap directly.
-    #[inline]
+    ///
+    /// `inline(always)` is load-bearing: this sits under every distance
+    /// computation in the graph, so the wrapper must fold into the caller even at
+    /// `-O0` or debug/test builds pay a call per comp. The `base.is_none()`
+    /// fast path — an in-RAM graph, the overwhelmingly common case — skips the
+    /// base-count division entirely and is exactly the pre-paging access.
+    #[inline(always)]
     fn with<R>(&self, node: u32, unit: usize, f: impl FnOnce(&[T]) -> R) -> R {
         let node = node as usize;
+        let Some(base) = &self.base else {
+            let s = node * unit;
+            return f(&self.tail[s..s + unit]);
+        };
         let base_count = self.base_len / unit;
         if node < base_count {
-            self.base
-                .as_ref()
-                .expect("base present when base_len > 0")
-                .with(node, f)
+            base.with(node, f)
         } else {
             let s = (node - base_count) * unit;
             f(&self.tail[s..s + unit])
