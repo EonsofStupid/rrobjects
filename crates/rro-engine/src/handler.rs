@@ -18,6 +18,7 @@ pub struct FlowNode {
     estate: Option<Arc<connxism::Estate>>,
     token: Option<String>,
     auth: Option<crate::auth::AuthPolicy>,
+    cluster: Option<Arc<crate::cluster::Cluster>>,
     me: NodeId,
     started: std::time::Instant,
 }
@@ -30,6 +31,7 @@ impl FlowNode {
             estate: None,
             token: None,
             auth: None,
+            cluster: None,
             me: me.into(),
             started: std::time::Instant::now(),
         }
@@ -54,6 +56,14 @@ impl FlowNode {
     /// whose role permits it and whose namespace scope matches this node.
     pub fn with_auth(mut self, policy: crate::auth::AuthPolicy) -> Self {
         self.auth = Some(policy);
+        self
+    }
+
+    /// Make this node a cluster leader: it tracks follower replication progress
+    /// (from their `replicate` polls) and can hold a `durability: "quorum"` write
+    /// until a quorum of members have it. Without this, writes ack on local commit.
+    pub fn with_cluster(mut self, cluster: Arc<crate::cluster::Cluster>) -> Self {
+        self.cluster = Some(cluster);
         self
     }
 
@@ -196,6 +206,11 @@ impl Handler for FlowNode {
                     .get("since_seq")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                // The poll cursor IS the ack: a follower requesting `since` has
+                // applied everything below it. Record that for quorum-ack.
+                if let Some(cluster) = &self.cluster {
+                    cluster.observe(msg.from.as_str(), since);
+                }
                 let limit = msg
                     .body
                     .get("limit")
@@ -618,7 +633,45 @@ impl Handler for FlowNode {
                 }
                 let n = ops.len();
                 estate.recall().transaction(ops).await?;
-                Ok(Some(msg.reply(serde_json::json!({ "committed": n }))))
+
+                // Synchronous quorum durability: with `"durability": "quorum"` on
+                // a cluster leader, do not ack until a quorum of members hold this
+                // write. The write is already durable locally and readable by
+                // `replicate` (dense record from CF_VECS/CF_DOCS, not the
+                // out-of-band graph), so followers can pull it immediately.
+                let quorum = msg.body.get("durability").and_then(|v| v.as_str()) == Some("quorum");
+                let mut reply = serde_json::json!({ "committed": n });
+                if quorum {
+                    let Some(cluster) = &self.cluster else {
+                        return Ok(Some(msg.reply(serde_json::json!({
+                            "error": "durability \"quorum\" requested but this node is not a cluster leader",
+                            "committed_local": n,
+                        }))));
+                    };
+                    // The feed cursor one past this write — a follower must reach it.
+                    let target = estate.feed_stats()?.next_seq;
+                    let timeout = std::time::Duration::from_millis(
+                        msg.body
+                            .get("quorum_timeout_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(5_000),
+                    );
+                    match cluster.await_quorum(target, timeout).await {
+                        Ok(()) => {
+                            reply["durable"] = serde_json::json!("quorum");
+                            reply["quorum_seq"] = serde_json::json!(target);
+                        }
+                        // The write is durable locally but did NOT reach a quorum;
+                        // say so rather than ack a durability we did not achieve.
+                        Err(e) => {
+                            return Ok(Some(msg.reply(serde_json::json!({
+                                "error": e.to_string(),
+                                "committed_local": n,
+                            }))));
+                        }
+                    }
+                }
+                Ok(Some(msg.reply(reply)))
             }
 
             // `health`: uptime + a live estate snapshot + self-reported
@@ -637,6 +690,12 @@ impl Handler for FlowNode {
                         .unwrap_or(10_000) as usize;
                     body["estate"] = serde_json::to_value(estate.health()?)?;
                     body["issues"] = serde_json::to_value(estate.issues(threshold)?)?;
+                }
+                // Cluster view: the follower positions this leader knows.
+                if let Some(cluster) = &self.cluster {
+                    body["cluster"] = serde_json::json!({
+                        "followers": cluster.follower_cursors(),
+                    });
                 }
                 Ok(Some(msg.reply(body)))
             }

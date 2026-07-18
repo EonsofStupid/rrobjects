@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 
 pub mod auth;
+pub mod cluster;
 mod estate_map;
 mod flow;
 pub mod graphql;
@@ -33,6 +34,7 @@ mod serve;
 mod sql;
 
 pub use auth::{AuthPolicy, Claims, Role};
+pub use cluster::Cluster;
 pub use estate_map::estate_map;
 pub use flow::{ObjectBuilder, ObjectConfig, ReasonReadyObject};
 pub use handler::FlowNode;

@@ -21,17 +21,25 @@ use rro_net::{tcp, Message};
 pub struct Replica {
     leader: std::net::SocketAddr,
     estate: Arc<connxism::Estate>,
+    id: String,
     token: Option<String>,
     cursor: u64,
 }
 
 impl Replica {
     /// A replica of `leader` writing into the local `estate`, starting from the
-    /// beginning of the leader's changefeed.
-    pub fn new(leader: std::net::SocketAddr, estate: Arc<connxism::Estate>) -> Self {
+    /// beginning of the leader's changefeed. The `id` is how the leader tracks
+    /// this follower's replication progress for quorum-ack — it must be unique
+    /// per follower.
+    pub fn new(
+        id: impl Into<String>,
+        leader: std::net::SocketAddr,
+        estate: Arc<connxism::Estate>,
+    ) -> Self {
         Replica {
             leader,
             estate,
+            id: id.into(),
             token: None,
             cursor: 0,
         }
@@ -59,7 +67,7 @@ impl Replica {
     /// cursor. Returns how many entries were applied (0 = already at head).
     pub async fn sync_once(&mut self, limit: usize) -> Result<usize> {
         let mut msg = Message::request(
-            "replica",
+            self.id.as_str(),
             "leader",
             "replicate",
             serde_json::json!({ "since_seq": self.cursor, "limit": limit }),
