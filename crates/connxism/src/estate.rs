@@ -882,6 +882,55 @@ impl Estate {
         Ok(out)
     }
 
+    /// The **replication** view of the changefeed: each change carried with the
+    /// record a follower needs to apply it. Mirrors [`Self::changes`] (same
+    /// `since_seq` cursor, same ordering, same limit) but resolves each upsert to
+    /// its current dense record so a follower can rebuild the estate from the
+    /// stream alone — no back-channel fetch.
+    ///
+    /// An upsert whose document no longer exists (already removed by a later,
+    /// higher-seq change) yields `record: None`; the follower skips it and the
+    /// later remove reconciles. This makes the stream **convergent**: replaying
+    /// `[since_seq, head]` in order reaches the leader's current state.
+    pub async fn replication_batch(
+        &self,
+        since_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::model::ReplEntry>> {
+        let changes = self.changes(since_seq, limit)?;
+        let recall = self.recall();
+        let mut out = Vec::with_capacity(changes.len());
+        for c in changes {
+            let record = match c.op {
+                crate::model::ChangeOp::Upsert => {
+                    match (
+                        recall.vector_of(&c.doc_id).await?,
+                        recall.doc(&c.doc_id).await?,
+                    ) {
+                        (Some(embedding), Some(doc)) => Some(crate::model::ReplRecord {
+                            id: c.doc_id.clone(),
+                            embedding,
+                            text: doc.text,
+                            metadata: doc.metadata,
+                            collection: doc.collection,
+                        }),
+                        // Gone (superseded by a later remove) — the follower skips
+                        // it; the later entry reconciles.
+                        _ => None,
+                    }
+                }
+                crate::model::ChangeOp::Remove => None,
+            };
+            out.push(crate::model::ReplEntry {
+                seq: c.seq,
+                op: c.op,
+                doc_id: c.doc_id,
+                record,
+            });
+        }
+        Ok(out)
+    }
+
     fn scan_json<T: serde::de::DeserializeOwned>(&self, cf: &str) -> Result<Vec<T>> {
         let handle = self.db.cf(cf)?;
         let mut out = Vec::new();

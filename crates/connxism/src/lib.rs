@@ -40,8 +40,9 @@ pub use recall::Quantizer;
 pub const COLUMN_FAMILY_COUNT: usize = keys::COLUMN_FAMILIES.len();
 pub use index::{Bm25Params, Posting, Postings};
 pub use model::{
-    now_ms, now_ns, Change, ChangeOp, ConnectorInfo, ConnectorKind, EstateInfo, NodeInfo, Shape,
-    StoredDoc, SyncState, SyncStatus, Transport, TrendPoint, WarpPoint,
+    now_ms, now_ns, Change, ChangeOp, ConnectorInfo, ConnectorKind, EstateInfo, NodeInfo,
+    ReplEntry, ReplRecord, Shape, StoredDoc, SyncState, SyncStatus, Transport, TrendPoint,
+    WarpPoint,
 };
 pub use rels::{Relation, TraversalSpec};
 /// Re-exported from the core contract so estate consumers keep one import.

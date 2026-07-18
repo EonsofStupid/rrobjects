@@ -222,6 +222,64 @@ pub struct Change {
     pub at: EpochMs,
 }
 
+/// One **replication** entry: a changefeed row carried together with the payload
+/// a follower needs to reproduce the write. The lean [`Change`] carries only the
+/// id (enough for a live subscriber to re-fetch); a follower rebuilding a whole
+/// estate needs the record itself, so replication ships it inline.
+///
+/// `record` is `Some` for an [`ChangeOp::Upsert`] whose document still exists at
+/// read time, and `None` for a [`ChangeOp::Remove`] (or an upsert already
+/// superseded by a later remove — the follower converges to the leader's *current*
+/// state, and a later entry reconciles the gap).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplEntry {
+    /// The changefeed sequence — the follower's resume cursor.
+    pub seq: u64,
+    /// What happened.
+    pub op: ChangeOp,
+    /// The affected document id.
+    pub doc_id: String,
+    /// The record to apply on an upsert. `None` for a remove (or an upsert already
+    /// superseded by a later remove).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<ReplRecord>,
+}
+
+/// The wire form of a replicated document: the **dense** record a follower needs
+/// to reproduce an upsert. Explicitly dense — the internal `VectorRecord` also
+/// carries sparse / named / multi-vector spaces, which Stage-1 replication does
+/// not yet ship (a documented follow-on); making that a distinct type keeps the
+/// wire honest about what crosses it rather than serializing a fuller record than
+/// is actually filled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplRecord {
+    /// Document id.
+    pub id: String,
+    /// The dense embedding.
+    pub embedding: rro_core::Embedding,
+    /// Raw text.
+    pub text: String,
+    /// Structured metadata.
+    #[serde(default)]
+    pub metadata: rro_core::Metadata,
+    /// The named collection, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+}
+
+impl ReplRecord {
+    /// Rebuild the upsert-ready [`rro_core::VectorRecord`] on the follower. Tags,
+    /// shape, token length and postings are re-derived by the estate on upsert —
+    /// exactly as they were on the leader — so the mirror is faithful for the
+    /// dense path without shipping any of that derived state.
+    pub fn into_record(self) -> rro_core::VectorRecord {
+        let mut r = rro_core::VectorRecord::new(self.id, self.embedding, self.text);
+        r.metadata = self.metadata;
+        r.collection = self.collection;
+        r
+    }
+}
+
 /// One point in a metric's time-series.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrendPoint {

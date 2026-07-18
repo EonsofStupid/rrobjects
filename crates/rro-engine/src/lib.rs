@@ -27,6 +27,7 @@ mod handler;
 pub mod http;
 mod ingest;
 pub mod ops;
+mod replica;
 mod sample;
 mod serve;
 mod sql;
@@ -39,6 +40,7 @@ pub use http::serve_http;
 pub use ingest::{
     spawn_ingest, IngestConfig, IngestHandle, IngestPhase, IngestStats, IngestStatus,
 };
+pub use replica::Replica;
 pub use sample::sample_corpus;
 pub use serve::{serve, wait_for_shutdown, ServeOptions};
 

@@ -95,7 +95,7 @@ implements the ones it has its own way. There is no SurrealDB or Qdrant in the c
 | WebSocket RPC | ❌ streaming (`watch`/`live`) doorway — follow-on | `rro-engine/src/http.rs` | **11** |
 | **GraphQL** | ✅ 2026-07-17 — query **+ mutation** surface (parser+executor) over the a2a transport, NOT a bolted-on HTTP server. GraphQL is a language, not a transport. `graphql` verb + `rro_graphql` MCP. `mutation { upsert / delete }` write through the same estate the reads query; a reader's mutation is refused like a reader's `sql` write. Introspection/subscriptions = follow-on | `rro-engine/src/graphql.rs` | ~~11~~ |
 | Import / export | ❌ | `rro-http` | **11** |
-| Distributed / cluster | ❌ | `rro-net` | **13** |
+| Distributed / cluster | 🚧 2026-07-17 — **stage 1 (replication) landed**: a `replicate` verb ships each changefeed entry with its dense record; a `Replica` follower rebuilds a leader's estate from the stream alone (convergent, idempotent, cursor-resumable) — proven to reach byte-identical vectors. Self-reliant failover (quorum-ack + leader lease + promotion) builds on this | `connxism` (`ReplEntry`/`replication_batch`), `rro-engine/src/replica.rs` | **13** |
 | Full-text search + analyzers | ✅ | `index.rs`, `text::Analyzer` | — |
 | Geospatial | ✅ true haversine | `query.rs` | — |
 | Graph traversal | ✅ | `rels.rs` | — |

@@ -179,6 +179,43 @@ impl Handler for FlowNode {
                 }))))
             }
 
+            // `replicate`: the replication view of the changefeed — each change
+            // carried with the record a follower needs to apply it. Body:
+            // {"since_seq": 0, "limit": 256}; reply {"entries": [...],
+            // "next_seq": N}. This is what a follower polls to rebuild a leader's
+            // estate from the stream alone (no back-channel fetch), the primitive
+            // the cluster stands on. A read of the leader's log — reader-level.
+            "replicate" => {
+                let Some(estate) = &self.estate else {
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "no estate attached to this node"
+                    }))));
+                };
+                let since = msg
+                    .body
+                    .get("since_seq")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let limit = msg
+                    .body
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(256)
+                    .min(4096) as usize;
+                match estate.replication_batch(since, limit).await {
+                    Ok(entries) => {
+                        let next = entries.last().map(|e| e.seq + 1).unwrap_or(since);
+                        Ok(Some(msg.reply(serde_json::json!({
+                            "entries": entries,
+                            "next_seq": next,
+                        }))))
+                    }
+                    Err(e) => Ok(Some(
+                        msg.reply(serde_json::json!({ "error": e.to_string() })),
+                    )),
+                }
+            }
+
             // `query`: the full typed query plane over the wire. The body IS
             // an `EstateQuery` (filters, threshold, scope, lean payload).
             // Text-only queries are embedded server-side by the flow's
