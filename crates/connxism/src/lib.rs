@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod catalog;
 mod estate;
 mod filter;
 pub mod index;
@@ -29,6 +30,7 @@ mod store;
 mod strategies;
 mod txn;
 
+pub use catalog::Catalog;
 pub use estate::{
     Estate, EstateConfig, FeedStats, GraphCompaction, GraphNodes, HealthReport, Issue, Quotas,
 };
