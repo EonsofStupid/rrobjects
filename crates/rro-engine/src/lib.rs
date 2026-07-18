@@ -23,6 +23,7 @@ mod estate_map;
 mod flow;
 pub mod graphql;
 mod handler;
+pub mod http;
 mod ingest;
 pub mod ops;
 mod sample;
@@ -32,6 +33,7 @@ mod sql;
 pub use estate_map::estate_map;
 pub use flow::{ObjectBuilder, ObjectConfig, ReasonReadyObject};
 pub use handler::FlowNode;
+pub use http::serve_http;
 pub use ingest::{
     spawn_ingest, IngestConfig, IngestHandle, IngestPhase, IngestStats, IngestStatus,
 };

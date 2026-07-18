@@ -117,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
     let opts = ServeOptions {
         node_id: std::env::var("RRO_NODE").unwrap_or_else(|_| "rro".to_string()),
         listen: std::env::var("RRO_LISTEN").ok(),
+        http_listen: std::env::var("RRO_HTTP").ok(),
         estate: estate_handle,
         token: std::env::var("RRO_TOKEN").ok(),
     };
