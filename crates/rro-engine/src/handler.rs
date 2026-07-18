@@ -525,6 +525,19 @@ impl Handler for FlowNode {
                     }))));
                 };
                 let query = msg.body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                // GraphQL carries writes (mutations) as well as reads; a reader's
+                // mutation is refused exactly like a reader's `sql` write.
+                if caller_role == Some(crate::auth::Role::Reader)
+                    && crate::graphql::is_mutation(query)
+                {
+                    rro_core::events::emit(
+                        "a2a.unauthorized",
+                        serde_json::json!({ "verb": "graphql", "op": "mutation" }),
+                    );
+                    return Ok(Some(msg.reply(serde_json::json!({
+                        "error": "unauthorized"
+                    }))));
+                }
                 let result = crate::graphql::execute(query, estate, &self.flow).await;
                 Ok(Some(msg.reply(result)))
             }

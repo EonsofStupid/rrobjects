@@ -93,7 +93,7 @@ implements the ones it has its own way. There is no SurrealDB or Qdrant in the c
 | Namespace-scoped permissions | ✅ 2026-07-17 — token `ns` claim; a scoped token is refused on a node serving another namespace (the same key cannot bypass it) | `rro-engine/src/auth.rs` | ~~12~~ |
 | HTTP REST doorway | ✅ 2026-07-17 — thin HTTP/1.1 front door (no new crate, no hyper/axum): builds the a2a `Message` and calls the one `FlowNode::handle`, so HTTP is byte-identical to a2a by construction. `POST /query` · `POST /ask` · `GET /health` · probes · `POST /v/{verb}` escape hatch. Bearer token → the same capability gate. Gate: `POST /query` ≡ a2a `query` ≡ `estate.recall().query()` | `rro-engine/src/http.rs` | ~~11~~ |
 | WebSocket RPC | ❌ streaming (`watch`/`live`) doorway — follow-on | `rro-engine/src/http.rs` | **11** |
-| **GraphQL** | ✅ 2026-07-17 — query surface (parser+executor) over the a2a transport, NOT a bolted-on HTTP server. GraphQL is a language, not a transport. `graphql` verb + `rro_graphql` MCP. Mutations/introspection = follow-on | `rro-engine/src/graphql.rs` | ~~11~~ |
+| **GraphQL** | ✅ 2026-07-17 — query **+ mutation** surface (parser+executor) over the a2a transport, NOT a bolted-on HTTP server. GraphQL is a language, not a transport. `graphql` verb + `rro_graphql` MCP. `mutation { upsert / delete }` write through the same estate the reads query; a reader's mutation is refused like a reader's `sql` write. Introspection/subscriptions = follow-on | `rro-engine/src/graphql.rs` | ~~11~~ |
 | Import / export | ❌ | `rro-http` | **11** |
 | Distributed / cluster | ❌ | `rro-net` | **13** |
 | Full-text search + analyzers | ✅ | `index.rs`, `text::Analyzer` | — |

@@ -20,14 +20,15 @@
 //!
 //! ## What "GraphQL" means here, honestly
 //!
-//! This implements the **query** half of GraphQL's execution model: a real
-//! recursive-descent parser for selection sets with arguments, and an executor
-//! that resolves each requested field and projects exactly the sub-fields asked
-//! for — the property that distinguishes GraphQL from REST (the client chooses
-//! the response shape). It is **not** the whole spec: no mutations, no
-//! subscriptions, no fragments, no variables, no introspection yet. Those are
-//! additive and named in the roadmap. Writes go through the `tx`/`sql` surfaces;
-//! this is read-side, where GraphQL's shape-selection actually earns its keep.
+//! This implements the **query and mutation** halves of GraphQL's execution
+//! model: a real recursive-descent parser for selection sets with arguments, and
+//! an executor that resolves each requested field and projects exactly the
+//! sub-fields asked for — the property that distinguishes GraphQL from REST (the
+//! client chooses the response shape). It is **not** the whole spec: no
+//! subscriptions, fragments, variables or introspection yet. Those are additive
+//! and named in the roadmap. Mutations write through the same estate/flow paths
+//! the `index`/`tx` verbs use, and a reader-role token's mutation is refused
+//! exactly like its `sql` write.
 //!
 //! The schema:
 //!
@@ -37,6 +38,10 @@
 //!   collections: [Collection!]!
 //!   document(id: String!): Document
 //!   search(query: String!, topK: Int, mode: String): [Hit!]!
+//! }
+//! type Mutation {
+//!   upsert(id: String!, text: String!): UpsertResult
+//!   delete(id: String!): DeleteResult
 //! }
 //! ```
 //!
@@ -48,6 +53,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use rro_core::Recall;
 
 use crate::flow::ReasonReadyObject;
 
@@ -169,6 +176,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Which GraphQL operation the document is: a read or a write.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Operation {
+    Query,
+    Mutation,
+}
+
 /// A JSON-ish argument value.
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
@@ -209,17 +223,29 @@ impl Parser {
         }
     }
 
-    /// A document is an anonymous `query`: an outer selection set, with an
-    /// optional leading `query` keyword.
-    fn document(&mut self) -> Result<Vec<Field>, String> {
-        if self.peek() == &Tok::Name("query".to_string()) {
-            self.next();
-        }
+    /// A document is a selection set with an optional leading operation keyword:
+    /// `query` (the default) or `mutation`. Anonymous operations only — named
+    /// operations, variables and fragments are follow-ons.
+    fn document(&mut self) -> Result<(Operation, Vec<Field>), String> {
+        let op = match self.peek() {
+            Tok::Name(n) if n == "query" => {
+                self.next();
+                Operation::Query
+            }
+            Tok::Name(n) if n == "mutation" => {
+                self.next();
+                Operation::Mutation
+            }
+            _ => Operation::Query,
+        };
         let sel = self.selection_set()?;
         if self.peek() != &Tok::Eof {
-            return Err(format!("trailing tokens after query: {:?}", self.peek()));
+            return Err(format!(
+                "trailing tokens after operation: {:?}",
+                self.peek()
+            ));
         }
-        Ok(sel)
+        Ok((op, sel))
     }
 
     fn selection_set(&mut self) -> Result<Vec<Field>, String> {
@@ -280,10 +306,19 @@ impl Parser {
     }
 }
 
-fn parse(src: &str) -> Result<Vec<Field>, String> {
+fn parse(src: &str) -> Result<(Operation, Vec<Field>), String> {
     let toks = lex(src)?;
     let mut p = Parser { toks, pos: 0 };
     p.document()
+}
+
+/// Whether `src` is a GraphQL **mutation** (a write). The caller gates it: the
+/// `graphql` verb is admitted at reader level, but a reader's mutation is refused
+/// exactly like a reader's `sql` write — the write surface is covered whichever
+/// language carries it. A malformed document is not a mutation (it will fail in
+/// `execute` with a parse error).
+pub fn is_mutation(src: &str) -> bool {
+    matches!(parse(src), Ok((Operation::Mutation, _)))
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +335,7 @@ pub async fn execute(
     estate: &connxism::Estate,
     flow: &Arc<ReasonReadyObject>,
 ) -> serde_json::Value {
-    let roots = match parse(query) {
+    let (operation, roots) = match parse(query) {
         Ok(r) => r,
         Err(e) => {
             return serde_json::json!({ "errors": [{ "message": format!("parse error: {e}") }] });
@@ -311,8 +346,13 @@ pub async fn execute(
     let mut errors: Vec<serde_json::Value> = Vec::new();
 
     for field in &roots {
-        // The response key is the field name (aliases are a follow-on).
-        match resolve_root(field, estate, flow).await {
+        // The response key is the field name (aliases are a follow-on). Query
+        // roots resolve reads; mutation roots resolve writes.
+        let resolved = match operation {
+            Operation::Query => resolve_root(field, estate, flow).await,
+            Operation::Mutation => resolve_mutation(field, estate, flow).await,
+        };
+        match resolved {
             Ok(v) => {
                 data.insert(field.name.clone(), v);
             }
@@ -414,6 +454,67 @@ async fn resolve_root(
     }
 }
 
+/// Resolve one mutation root field. Writes go through the same estate/flow paths
+/// the a2a `index`/`tx` verbs use — GraphQL adds a shape-selecting surface, not a
+/// second write implementation.
+///
+/// ```graphql
+/// type Mutation {
+///   upsert(id: String!, text: String!): UpsertResult
+///   delete(id: String!): DeleteResult
+/// }
+/// ```
+async fn resolve_mutation(
+    field: &Field,
+    estate: &connxism::Estate,
+    flow: &Arc<ReasonReadyObject>,
+) -> Result<serde_json::Value, String> {
+    let str_arg = |name: &str| match field.args.get(name) {
+        Some(Value::Str(s)) => Ok(s.clone()),
+        _ => Err(format!("{}(...) requires a string `{name}`", field.name)),
+    };
+    match field.name.as_str() {
+        "upsert" => {
+            let id = str_arg("id")?;
+            let text = str_arg("text")?;
+            // Embed with the flow's embedder, then write to the SAME estate the
+            // read resolvers query — so an upsert is immediately visible to a
+            // subsequent `search`/`document`, not written to a parallel store.
+            let doc = rro_core::Document {
+                id: rro_core::Id::from(id.clone()),
+                text,
+                metadata: rro_core::Metadata::new(),
+            };
+            let records = flow
+                .embed_documents(vec![doc])
+                .await
+                .map_err(|e| e.to_string())?;
+            estate
+                .recall()
+                .upsert(records)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(project(
+                &field.selection,
+                &serde_json::json!({ "id": id, "indexed": 1 }),
+            ))
+        }
+        "delete" => {
+            let id = str_arg("id")?;
+            estate
+                .recall()
+                .remove(&rro_core::Id::from(id.clone()))
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(project(
+                &field.selection,
+                &serde_json::json!({ "id": id, "deleted": true }),
+            ))
+        }
+        other => Err(format!("unknown field `{other}` on Mutation")),
+    }
+}
+
 /// Project a resolved object down to exactly the requested sub-fields — the
 /// core of GraphQL: the client chose the shape, so the server returns that shape
 /// and no more. An empty selection returns the whole object (scalar leaf).
@@ -442,7 +543,8 @@ mod tests {
     #[test]
     fn parses_nested_selection_with_arguments() {
         let q = r#"{ search(query: "hello world", topK: 3, mode: "dbsf") { id score metadata { kind } } }"#;
-        let roots = parse(q).unwrap();
+        let (op, roots) = parse(q).unwrap();
+        assert_eq!(op, Operation::Query);
         assert_eq!(roots.len(), 1);
         let s = &roots[0];
         assert_eq!(s.name, "search");
@@ -460,6 +562,21 @@ mod tests {
     }
 
     #[test]
+    fn mutation_keyword_is_recognized() {
+        let (op, roots) =
+            parse(r#"mutation { upsert(id: "d1", text: "hi") { id indexed } }"#).unwrap();
+        assert_eq!(op, Operation::Mutation);
+        assert_eq!(roots[0].name, "upsert");
+        assert_eq!(roots[0].args.get("id"), Some(&Value::Str("d1".into())));
+
+        // is_mutation distinguishes writes from reads and malformed input.
+        assert!(is_mutation(r#"mutation { delete(id: "d1") { id } }"#));
+        assert!(!is_mutation("{ health }"));
+        assert!(!is_mutation("query { search(query: \"x\") { id } }"));
+        assert!(!is_mutation("mutation { "), "malformed is not a mutation");
+    }
+
+    #[test]
     fn a_malformed_query_is_an_error_not_a_panic() {
         assert!(parse("{ search(query: }").is_err());
         assert!(parse("{ unclosed ").is_err());
@@ -469,7 +586,7 @@ mod tests {
     #[test]
     fn projection_returns_only_requested_fields() {
         let obj = serde_json::json!({ "id": "a", "text": "hello", "score": 0.9 });
-        let sel = parse("{ id score }").unwrap();
+        let (_op, sel) = parse("{ id score }").unwrap();
         let out = project(&sel, &obj);
         assert_eq!(out.get("id").unwrap(), "a");
         assert_eq!(out.get("score").unwrap(), 0.9);
@@ -485,7 +602,7 @@ mod tests {
             "id": "a",
             "metadata": { "kind": "doc", "team": "eng" }
         });
-        let sel = parse("{ id metadata { kind } }").unwrap();
+        let (_op, sel) = parse("{ id metadata { kind } }").unwrap();
         let out = project(&sel, &obj);
         let meta = out.get("metadata").unwrap();
         assert_eq!(meta.get("kind").unwrap(), "doc");
