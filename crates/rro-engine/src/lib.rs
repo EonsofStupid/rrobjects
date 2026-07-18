@@ -34,7 +34,7 @@ mod serve;
 mod sql;
 
 pub use auth::{AuthPolicy, Claims, Role};
-pub use cluster::Cluster;
+pub use cluster::{elect, Cluster, Lease};
 pub use estate_map::estate_map;
 pub use flow::{ObjectBuilder, ObjectConfig, ReasonReadyObject};
 pub use handler::FlowNode;
