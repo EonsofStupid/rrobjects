@@ -390,6 +390,11 @@ pub const META_COLLECTIONS: &[u8] = b"collections";
 /// meta: JSON map `alias → collection name`.
 pub const META_ALIASES: &[u8] = b"aliases";
 
+/// meta: schemafull field constraints — JSON map
+/// `collection → { field → type-keyword }`. A write to a collection whose field
+/// is present must match the declared type or the upsert is rejected.
+pub const META_SCHEMA: &[u8] = b"schema";
+
 /// Encode a named-vector row key: `space \x00 doc_id`.
 pub fn nvec_key(space: &str, doc_id: &str) -> Vec<u8> {
     compound(space, doc_id)

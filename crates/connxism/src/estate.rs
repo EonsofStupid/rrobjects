@@ -108,6 +108,41 @@ pub(crate) fn io_err(e: std::io::Error) -> RroError {
     RroError::Recall(format!("graph sidecar: {e}"))
 }
 
+/// The canonical keyword for a schemafull type, or `None` if it is not a type
+/// this engine enforces.
+pub(crate) fn field_type_of(ty: &str) -> Option<&'static str> {
+    match ty {
+        "string" => Some("string"),
+        "int" => Some("int"),
+        "float" => Some("float"),
+        "bool" => Some("bool"),
+        "datetime" => Some("datetime"),
+        "uuid" => Some("uuid"),
+        _ => None,
+    }
+}
+
+/// Whether a metadata value satisfies a declared schemafull type. Datetime and
+/// UUID are validated by actually parsing the string (order-preserving encodings
+/// the payload index already relies on), so the schema and the index agree.
+pub(crate) fn value_matches_type(v: &serde_json::Value, ty: &str) -> bool {
+    match ty {
+        "string" => v.is_string(),
+        "int" => v.is_i64() || v.is_u64(),
+        "float" => v.is_number(),
+        "bool" => v.is_boolean(),
+        "datetime" => v
+            .as_str()
+            .and_then(rro_core::time::rfc3339_to_epoch_ms)
+            .is_some(),
+        "uuid" => v
+            .as_str()
+            .and_then(rro_core::time::parse_uuid_bytes)
+            .is_some(),
+        _ => false,
+    }
+}
+
 /// Resource limits enforced at the write and query boundaries. `None`
 /// means unlimited. Operational config (like quantization), not index
 /// identity — set at open, reported in health.
@@ -995,6 +1030,50 @@ impl Estate {
             serde_json::json!({ "alias": alias, "collection": collection }),
         );
         Ok(())
+    }
+
+    /// Declare a schemafull field type on a collection: a record in `collection`
+    /// whose metadata carries `field` must match `ty` (a type keyword —
+    /// `string`/`int`/`float`/`bool`/`datetime`/`uuid`) or the write is rejected.
+    pub fn define_field(&self, collection: &str, field: &str, ty: &str) -> Result<()> {
+        if field_type_of(ty).is_none() {
+            return Err(RroError::msg(format!("unknown field type `{ty}`")));
+        }
+        let mut schema = self.schema()?;
+        schema
+            .entry(collection.to_string())
+            .or_default()
+            .insert(field.to_string(), ty.to_string());
+        self.db.put_json(CF_META, keys::META_SCHEMA, &schema)?;
+        rro_core::events::emit(
+            "estate.define_field",
+            serde_json::json!({ "collection": collection, "field": field, "type": ty }),
+        );
+        Ok(())
+    }
+
+    /// Drop a schemafull field constraint.
+    pub fn remove_field(&self, collection: &str, field: &str) -> Result<()> {
+        let mut schema = self.schema()?;
+        if let Some(fields) = schema.get_mut(collection) {
+            fields.remove(field);
+            if fields.is_empty() {
+                schema.remove(collection);
+            }
+        }
+        self.db.put_json(CF_META, keys::META_SCHEMA, &schema)?;
+        Ok(())
+    }
+
+    /// The whole schema map: `collection → { field → type keyword }`.
+    pub fn schema(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>
+    {
+        Ok(self
+            .db
+            .get_json(CF_META, keys::META_SCHEMA)?
+            .unwrap_or_default())
     }
 
     /// The alias map (alias → collection).

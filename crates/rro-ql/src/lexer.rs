@@ -71,6 +71,10 @@ pub enum TokenKind {
     Alias,
     /// `COLLECTION`
     Collection,
+    /// `FIELD`
+    Field,
+    /// `TYPE`
+    Type,
     /// `ON`
     On,
     /// `FOR`
@@ -156,6 +160,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Index => "INDEX",
             TokenKind::Alias => "ALIAS",
             TokenKind::Collection => "COLLECTION",
+            TokenKind::Field => "FIELD",
+            TokenKind::Type => "TYPE",
             TokenKind::On => "ON",
             TokenKind::For => "FOR",
             TokenKind::Update => "UPDATE",
@@ -415,6 +421,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 "INDEX" => TokenKind::Index,
                 "ALIAS" => TokenKind::Alias,
                 "COLLECTION" => TokenKind::Collection,
+                "FIELD" => TokenKind::Field,
+                "TYPE" => TokenKind::Type,
                 "ON" => TokenKind::On,
                 "FOR" => TokenKind::For,
                 "UPDATE" => TokenKind::Update,

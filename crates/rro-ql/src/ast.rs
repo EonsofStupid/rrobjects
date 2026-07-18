@@ -132,11 +132,53 @@ pub struct Select {
     pub limit: Option<usize>,
 }
 
-/// `DEFINE INDEX ON <field>` — a payload index.
-///
-/// Only the subjects the engine actually has. Promising `DEFINE TABLE`/`FIELD`/
-/// `EVENT` before schemas exist (Phase 10) would be a language writing cheques
-/// the engine cannot cash.
+/// A schemafull field's declared type — the constraint a write is validated
+/// against. Mirrors the payload-index typed encodings the engine already has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldType {
+    /// UTF-8 string.
+    String,
+    /// Integer (JSON number with no fractional part).
+    Int,
+    /// Any JSON number (integer or float).
+    Float,
+    /// Boolean.
+    Bool,
+    /// RFC3339 datetime string.
+    Datetime,
+    /// UUID string.
+    Uuid,
+}
+
+impl FieldType {
+    /// Parse a `TYPE` keyword (`string`/`int`/`float`/`bool`/`datetime`/`uuid`,
+    /// case-insensitive; `number` is an alias for `float`).
+    pub fn parse(s: &str) -> Option<FieldType> {
+        match s.to_ascii_lowercase().as_str() {
+            "string" => Some(FieldType::String),
+            "int" | "integer" => Some(FieldType::Int),
+            "float" | "number" | "decimal" => Some(FieldType::Float),
+            "bool" | "boolean" => Some(FieldType::Bool),
+            "datetime" => Some(FieldType::Datetime),
+            "uuid" => Some(FieldType::Uuid),
+            _ => None,
+        }
+    }
+
+    /// The canonical keyword.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FieldType::String => "string",
+            FieldType::Int => "int",
+            FieldType::Float => "float",
+            FieldType::Bool => "bool",
+            FieldType::Datetime => "datetime",
+            FieldType::Uuid => "uuid",
+        }
+    }
+}
+
+/// `DEFINE INDEX ON <field>` / `DEFINE ALIAS` / `DEFINE FIELD ... TYPE ...`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Define {
     /// `DEFINE INDEX ON <field>` → `create_payload_index`.
@@ -151,9 +193,20 @@ pub enum Define {
         /// The collection it points at.
         collection: String,
     },
+    /// `DEFINE FIELD <field> ON <collection> TYPE <type>` — a schemafull type
+    /// constraint: a record in `collection` whose `field` is present must match
+    /// `ty`, or the write is rejected.
+    Field {
+        /// The metadata field the constraint applies to.
+        field: String,
+        /// The collection it is scoped to.
+        collection: String,
+        /// The declared type.
+        ty: FieldType,
+    },
 }
 
-/// `REMOVE INDEX ON <field>` / `REMOVE ALIAS <a>` / `REMOVE COLLECTION <c>`.
+/// `REMOVE ALIAS <a>` / `REMOVE COLLECTION <c>` / `REMOVE FIELD <f> ON <c>`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Remove {
     /// `REMOVE ALIAS <alias>` → `delete_alias`.
@@ -165,6 +218,13 @@ pub enum Remove {
     Collection {
         /// The collection name.
         name: String,
+    },
+    /// `REMOVE FIELD <field> ON <collection>` → drop the schemafull constraint.
+    Field {
+        /// The metadata field.
+        field: String,
+        /// The collection it was scoped to.
+        collection: String,
     },
 }
 

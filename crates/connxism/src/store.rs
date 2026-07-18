@@ -756,6 +756,32 @@ fn upsert_into(
         }
     }
 
+    // Schemafull enforcement: a record whose collection has declared field types
+    // must satisfy them, or the whole upsert is rejected (rolled back — nothing
+    // durable has landed yet). A field not present is allowed; only a present,
+    // wrong-typed value fails, so schemas can be added to a live collection.
+    let schema: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+        db.get_json(CF_META, keys::META_SCHEMA)?.unwrap_or_default();
+    if !schema.is_empty() {
+        for r in &records {
+            let Some(coll) = &r.collection else { continue };
+            let Some(fields) = schema.get(coll) else {
+                continue;
+            };
+            for (field, ty) in fields {
+                if let Some(value) = r.metadata.get(field) {
+                    if !crate::estate::value_matches_type(value, ty) {
+                        return Err(RroError::msg(format!(
+                            "schemafull violation: `{coll}.{field}` must be {ty}, \
+                             got {value} for record `{}`",
+                            r.id.as_str()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     tx.touch_counters();
     // Postings are one row per (term, doc): every index write below is a
     // blind put/delete — no read-modify-write, flat cost as terms grow.

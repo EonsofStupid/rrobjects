@@ -37,8 +37,8 @@ mod lower;
 mod parser;
 
 pub use ast::{
-    CmpOp, Define, Delete, Direction, Expr, Info, Live, Relate, Remove, Select, Statement,
-    Traverse, Update, Value,
+    CmpOp, Define, Delete, Direction, Expr, FieldType, Info, Live, Relate, Remove, Select,
+    Statement, Traverse, Update, Value,
 };
 pub use error::QlError;
 pub use lexer::{lex, LexError, Token, TokenKind};

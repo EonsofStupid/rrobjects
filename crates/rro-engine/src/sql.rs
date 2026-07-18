@@ -96,7 +96,24 @@ pub async fn apply(estate: &Arc<connxism::Estate>, stmt: Statement) -> Result<Sq
                 what: format!("alias {alias} -> {collection}"),
             })
         }
+        Statement::Define(Define::Field {
+            field,
+            collection,
+            ty,
+        }) => {
+            estate.define_field(&collection, &field, ty.as_str())?;
+            Ok(SqlOutcome::Defined {
+                what: format!("field {collection}.{field} type {}", ty.as_str()),
+            })
+        }
 
+        Statement::Remove(Remove::Field { field, collection }) => {
+            estate.remove_field(&collection, &field)?;
+            Ok(SqlOutcome::Removed {
+                what: format!("field {collection}.{field}"),
+                count: None,
+            })
+        }
         Statement::Remove(Remove::Alias { alias }) => {
             estate.delete_alias(&alias)?;
             Ok(SqlOutcome::Removed {
@@ -278,6 +295,35 @@ mod tests {
                 .contains(&"team".to_string()),
             "the index must actually exist afterwards, not just be reported"
         );
+    }
+
+    #[tokio::test]
+    async fn define_field_reaches_the_estate_and_binds_the_type() {
+        let (_d, estate) = estate_with_a_doc().await;
+        let out = run(&estate, "DEFINE FIELD price ON products TYPE float")
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            SqlOutcome::Defined {
+                what: "field products.price type float".into()
+            }
+        );
+        // The constraint actually exists in the estate's schema afterwards.
+        let schema = estate.schema().unwrap();
+        assert_eq!(
+            schema
+                .get("products")
+                .and_then(|f| f.get("price"))
+                .map(String::as_str),
+            Some("float")
+        );
+
+        // REMOVE FIELD via RRQL clears it.
+        run(&estate, "REMOVE FIELD price ON products")
+            .await
+            .unwrap();
+        assert!(estate.schema().unwrap().is_empty());
     }
 
     #[tokio::test]

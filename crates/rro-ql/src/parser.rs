@@ -6,8 +6,8 @@
 //! silent wrong-answer bug rather than a syntax error.
 
 use crate::ast::{
-    CmpOp, Define, Delete, Direction, Expr, Info, Live, Relate, Remove, Select, Statement,
-    Traverse, Update, Value,
+    CmpOp, Define, Delete, Direction, Expr, FieldType, Info, Live, Relate, Remove, Select,
+    Statement, Traverse, Update, Value,
 };
 use crate::error::QlError;
 use crate::lexer::{lex, Token, TokenKind};
@@ -238,6 +238,7 @@ impl Parser {
     }
 
     /// `DEFINE INDEX ON <field>` | `DEFINE ALIAS <a> FOR <collection>`
+    /// | `DEFINE FIELD <field> ON <collection> TYPE <type>`
     fn define(&mut self) -> Result<Define, QlError> {
         if self.eat(&TokenKind::Index) {
             self.expect(&TokenKind::On)?;
@@ -253,20 +254,41 @@ impl Parser {
                 collection: self.ident()?,
             });
         }
+        if self.eat(&TokenKind::Field) {
+            let field = self.ident()?;
+            self.expect(&TokenKind::On)?;
+            let collection = self.ident()?;
+            self.expect(&TokenKind::Type)?;
+            let span = self.span();
+            let ty_name = self.ident()?;
+            let ty = FieldType::parse(&ty_name).ok_or_else(|| {
+                QlError::new(
+                    format!(
+                        "unknown field type `{ty_name}` — expected string, int, \
+                         float, bool, datetime or uuid"
+                    ),
+                    span,
+                )
+            })?;
+            return Ok(Define::Field {
+                field,
+                collection,
+                ty,
+            });
+        }
         // Deliberately narrow: RRQL defines exactly what the engine has — payload
-        // indexes and aliases — and nothing else. Accepting `DEFINE TABLE` here
-        // and ignoring it would be the language lying about the engine.
+        // indexes, aliases, and schemafull field types — and nothing else.
         Err(QlError::new(
             format!(
-                "DEFINE supports INDEX and ALIAS, found {}. (TABLE/FIELD/EVENT need \
-                 schemas, which this engine does not have yet — Phase C4.)",
+                "DEFINE supports INDEX, ALIAS and FIELD, found {}. (TABLE/EVENT \
+                 are not implemented.)",
                 self.peek()
             ),
             self.span(),
         ))
     }
 
-    /// `REMOVE ALIAS <a>` | `REMOVE COLLECTION <c>`
+    /// `REMOVE ALIAS <a>` | `REMOVE COLLECTION <c>` | `REMOVE FIELD <f> ON <c>`
     fn remove(&mut self) -> Result<Remove, QlError> {
         if self.eat(&TokenKind::Alias) {
             return Ok(Remove::Alias {
@@ -278,9 +300,17 @@ impl Parser {
                 name: self.ident()?,
             });
         }
+        if self.eat(&TokenKind::Field) {
+            let field = self.ident()?;
+            self.expect(&TokenKind::On)?;
+            return Ok(Remove::Field {
+                field,
+                collection: self.ident()?,
+            });
+        }
         Err(QlError::new(
             format!(
-                "REMOVE supports ALIAS and COLLECTION, found {}",
+                "REMOVE supports ALIAS, COLLECTION and FIELD, found {}",
                 self.peek()
             ),
             self.span(),
@@ -554,13 +584,36 @@ mod tests {
     /// why.
     #[test]
     fn define_table_is_refused_and_says_why() {
+        // FIELD is now implemented (schemafull types); TABLE still is not.
         let e = parse("DEFINE TABLE docs").unwrap_err();
-        assert!(e.message.contains("INDEX and ALIAS"), "{}", e.message);
         assert!(
-            e.message.contains("Phase C4"),
-            "names when it lands: {}",
+            e.message.contains("INDEX, ALIAS and FIELD"),
+            "{}",
             e.message
         );
+        assert!(e.message.contains("TABLE"), "names TABLE: {}", e.message);
+    }
+
+    #[test]
+    fn define_and_remove_field_parse() {
+        assert_eq!(
+            parse("DEFINE FIELD price ON products TYPE float").unwrap(),
+            Statement::Define(Define::Field {
+                field: "price".into(),
+                collection: "products".into(),
+                ty: FieldType::Float,
+            })
+        );
+        assert_eq!(
+            parse("REMOVE FIELD price ON products").unwrap(),
+            Statement::Remove(Remove::Field {
+                field: "price".into(),
+                collection: "products".into(),
+            })
+        );
+        // An unknown type is a clear parse error.
+        let e = parse("DEFINE FIELD x ON y TYPE bogus").unwrap_err();
+        assert!(e.message.contains("unknown field type"), "{}", e.message);
     }
 
     #[test]
