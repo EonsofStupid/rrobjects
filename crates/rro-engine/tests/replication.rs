@@ -62,7 +62,7 @@ async fn a_follower_converges_to_the_leader_then_stays_caught_up() {
     // Fresh follower — empty estate, replicates from seq 0.
     let fdir = tempfile::tempdir().unwrap();
     let festate = Arc::new(connxism::Estate::open(fdir.path(), "follower").unwrap());
-    let mut replica = Replica::new(laddr, festate.clone());
+    let mut replica = Replica::new("f1", laddr, festate.clone());
 
     let applied = replica.sync_to_head(256).await.unwrap();
     assert_eq!(applied, 3, "three upserts replicated");
@@ -140,7 +140,7 @@ async fn replay_is_idempotent_and_resumes_from_a_cursor() {
         .unwrap();
     festate.recall().quiesce().await.unwrap();
 
-    let mut replica = Replica::new(laddr, festate.clone());
+    let mut replica = Replica::new("f1", laddr, festate.clone());
     replica.sync_to_head(256).await.unwrap();
     assert_eq!(
         festate.recall().len().await.unwrap(),
@@ -152,7 +152,7 @@ async fn replay_is_idempotent_and_resumes_from_a_cursor() {
     // Small batches force multiple round-trips; the cursor must not skip an entry.
     let fdir2 = tempfile::tempdir().unwrap();
     let festate2 = Arc::new(connxism::Estate::open(fdir2.path(), "follower2").unwrap());
-    let mut replica2 = Replica::new(laddr, festate2.clone());
+    let mut replica2 = Replica::new("f2", laddr, festate2.clone());
     let applied = replica2.sync_to_head(1).await.unwrap(); // one entry per pull
     assert_eq!(applied, 3, "batched-by-one still applies every entry");
     assert_eq!(snapshot(&lestate).await, snapshot(&festate2).await);
