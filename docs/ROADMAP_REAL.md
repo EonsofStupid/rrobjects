@@ -91,8 +91,8 @@ implements the ones it has its own way. There is no SurrealDB or Qdrant in the c
 | Users / roles (root, ns, db) | ❌ | new | **12** |
 | JWT + JWKS | ❌ | new | **12** |
 | Record-level permissions | ❌ | new | **12** |
-| HTTP REST (`/sql`, `/key/:table`) | ❌ | `rro-http` | **11** |
-| WebSocket RPC | ❌ | `rro-http` | **11** |
+| HTTP REST doorway | ✅ 2026-07-17 — thin HTTP/1.1 front door (no new crate, no hyper/axum): builds the a2a `Message` and calls the one `FlowNode::handle`, so HTTP is byte-identical to a2a by construction. `POST /query` · `POST /ask` · `GET /health` · probes · `POST /v/{verb}` escape hatch. Bearer token → the same capability gate. Gate: `POST /query` ≡ a2a `query` ≡ `estate.recall().query()` | `rro-engine/src/http.rs` | ~~11~~ |
+| WebSocket RPC | ❌ streaming (`watch`/`live`) doorway — follow-on | `rro-engine/src/http.rs` | **11** |
 | **GraphQL** | ✅ 2026-07-17 — query surface (parser+executor) over the a2a transport, NOT a bolted-on HTTP server. GraphQL is a language, not a transport. `graphql` verb + `rro_graphql` MCP. Mutations/introspection = follow-on | `rro-engine/src/graphql.rs` | ~~11~~ |
 | Import / export | ❌ | `rro-http` | **11** |
 | Distributed / cluster | ❌ | `rro-net` | **13** |

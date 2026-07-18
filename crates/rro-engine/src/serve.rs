@@ -20,6 +20,10 @@ pub struct ServeOptions {
     pub node_id: String,
     /// If set, open the a2a TCP surface on this address (e.g. `127.0.0.1:7878`).
     pub listen: Option<String>,
+    /// If set, open the HTTP doorway on this address (e.g. `127.0.0.1:7879`).
+    /// The doorway maps HTTP requests onto the same a2a verbs — a thin front
+    /// door for clients that speak only HTTP, never a second implementation.
+    pub http_listen: Option<String>,
     /// Estate to expose on the a2a surface (`changes` subscription paging).
     pub estate: Option<std::sync::Arc<connxism::Estate>>,
     /// Capability token: when set, every a2a message except `ping` must bear it.
@@ -59,6 +63,18 @@ pub async fn serve(flow: Arc<ReasonReadyObject>, opts: ServeOptions) -> Result<(
         }
         None => {
             tracing::info!("a2a surface disabled (set listen to enable)");
+            None
+        }
+    };
+
+    let _http = match &opts.http_listen {
+        Some(addr) => {
+            let (bound, task) = crate::http::serve_http(addr, node.clone()).await?;
+            tracing::info!(%bound, "http doorway listening");
+            Some(task)
+        }
+        None => {
+            tracing::info!("http doorway disabled (set http_listen to enable)");
             None
         }
     };
