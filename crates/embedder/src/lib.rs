@@ -23,6 +23,8 @@ mod candle_qwen;
 mod deterministic;
 mod openai;
 mod tokenize;
+#[cfg(feature = "training")]
+pub mod training;
 
 #[cfg(feature = "candle")]
 pub use candle_qwen::{CandleQwenEmbedder, Qwen3Encoder, QwenEmbedConfig};

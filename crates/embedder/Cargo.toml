@@ -14,6 +14,17 @@ default = []
 # Enables the candle-backed DevPULSE (Qwen) embedder. Off by default so the
 # workspace builds with zero model weights.
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+# Contrastive fine-tuning of the Qwen3 embedder (candle-nn training loop). Implies
+# `candle` (reuses the same trainable encoder). Off by default; needs weights + GPU.
+training = ["candle"]
+# Build the candle backends against CUDA (the GB10 / Blackwell GPU). Off by
+# default so the CPU/CI build needs no toolkit. Set CUDA_COMPUTE_CAP=121 for sm_121.
+cuda = [
+    "candle",
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
 
 [dependencies]
 serde_json = { workspace = true }
@@ -30,6 +41,10 @@ tokenizers = { version = "0.23.1", default-features = false, features = ["onig"]
 tokio = { workspace = true, features = ["macros", "rt"] }
 proptest = { workspace = true }
 criterion = { workspace = true }
+
+[[bin]]
+name = "rro-train"
+required-features = ["training"]
 
 [[bench]]
 name = "embed"
