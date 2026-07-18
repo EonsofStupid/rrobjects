@@ -9,10 +9,18 @@ authors.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Fjall migration scaffolding. `kvs-fjall` pulls in the Fjall 3.x backend (pure-
+# Rust LSM) alongside the shipping RocksDB one, so the feasibility spike and the
+# coming parity/differential tests can run against it without disturbing the
+# default build. RocksDB stays the default engine until the port's gates pass.
+kvs-fjall = ["dep:fjall"]
+
 [dependencies]
 rro-core = { workspace = true }
 recall = { workspace = true }
 rocksdb = { workspace = true }
+fjall = { version = "3.1.7", optional = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
