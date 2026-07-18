@@ -583,16 +583,21 @@ impl Estate {
 
     // ---- snapshots ----------------------------------------------------------------
 
-    /// Write a consistent point-in-time snapshot of the whole estate to
-    /// `path` (RocksDB checkpoint: hard-links immutable SST files, copies the
-    /// WAL — cheap and crash-consistent). The snapshot directory opens as a
-    /// fully working estate via [`Estate::open`]; its persisted graph loads
-    /// directly (or rebuilds from the durable vectors, as on any open).
+    /// Write a consistent point-in-time snapshot of the whole estate to `path`.
+    /// The snapshot directory opens as a fully working estate via
+    /// [`Estate::open`]; its persisted graph loads directly (or rebuilds from the
+    /// durable vectors, as on any open).
+    ///
+    /// Consistency is backend-specific: the RocksDB backend hard-links immutable
+    /// SSTs and copies the WAL (an atomic checkpoint); the Fjall backend copies
+    /// the directory under a held MVCC snapshot. Both require the writer
+    /// quiescent, so this drains the out-of-band graph applier before copying.
     pub fn snapshot_to(&self, path: impl AsRef<Path>) -> Result<()> {
-        // Capture the graph first so the checkpoint carries a loadable blob and
-        // the snapshot opens in read-time too (best-effort; a rebuild covers any
-        // decline). Callers snapshot at quiescent points, which is what
-        // `persist_graph` needs.
+        // Drain the applier so no pending graph op lands mid-copy, then capture
+        // the graph so the snapshot carries a loadable blob (best-effort; a
+        // rebuild covers any decline). Quiescing is what makes the Fjall
+        // directory copy consistent and what `persist_graph` needs.
+        self.quiesce();
         let _ = self.persist_graph();
         self.db.snapshot_to(path.as_ref())?;
         rro_core::events::emit(

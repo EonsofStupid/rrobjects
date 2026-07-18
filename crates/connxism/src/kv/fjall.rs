@@ -18,12 +18,35 @@
 //! Correctness of the RMW relies on connxism serialising every write through one
 //! writer lock (see `store.rs`/`txn.rs`), so a `tdf` counter never races itself
 //! between the read and the batch commit.
+//!
+//! ## Capability parity with the RocksDB backend
+//!
+//! Everything RocksDB tunes that Fjall 3.1.7 can express is set here: per-CF
+//! point-lookup blooms, filter/index-block **pinning** on the hot CFs, 16 KiB
+//! data blocks, LZ4/None compression, KV separation (with explicit GC) on the
+//! vector CFs, role-weighted per-keyspace memtable sizing, a bounded WAL, and a
+//! consistent (MVCC-pinned) snapshot. Two RocksDB capabilities have **no faithful
+//! Fjall 3.1.7 equivalent** and are deliberately not faked:
+//!   - **`CF_TERMS` prefix bloom.** RocksDB accelerates BM25 posting-list prefix
+//!     scans with a NUL-terminated prefix extractor + memtable prefix bloom.
+//!     Fjall's filters are whole-key/point-read only (no prefix filter or
+//!     key-transform), so `CF_TERMS` runs unfiltered — BM25 lookups stay correct;
+//!     the scan is served by leveled locality + the shared block cache. Closing
+//!     this would require forking `lsm-tree`; deferred until real workloads show
+//!     it matters.
+//!   - **Global cross-keyspace memtable cap.** RocksDB's `db_write_buffer_size` is
+//!     a single hard ceiling; Fjall's equivalent is `#[deprecated]`/off in 3.1.7.
+//!     Replaced by the shaped per-keyspace budget in `memtable_size_for` + the
+//!     WAL cap, so aggregate write memory is still an intentional number.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use fjall::config::{BloomConstructionPolicy, CompressionPolicy, FilterPolicy, FilterPolicyEntry};
+use fjall::config::{
+    BlockSizePolicy, BloomConstructionPolicy, CompressionPolicy, FilterPolicy, FilterPolicyEntry,
+    PinningPolicy,
+};
 use fjall::{
     CompressionType, Database, Keyspace, KeyspaceCreateOptions, KvSeparationOptions, PersistMode,
 };
@@ -38,9 +61,42 @@ use crate::keys::{self, CF_META, COLUMN_FAMILIES};
 /// keys around it do not, so compaction moves pointers, not vectors.
 const KV_SEPARATION_THRESHOLD: u32 = 4 * 1024;
 
+/// Data block size — matches the RocksDB backend's 16 KiB blocks (RocksDB
+/// `set_block_size(16*1024)`), the unit the shared block cache holds and evicts.
+/// Fjall drops to its default block size otherwise; setting it keeps the two
+/// backends' cache granularity identical.
+const DATA_BLOCK_SIZE: u32 = 16 * 1024;
+
 /// Map a Fjall error into the engine error type.
 fn fjall_err(e: fjall::Error) -> RroError {
     RroError::Recall(format!("kvs: {e}"))
+}
+
+/// Per-keyspace memtable ceiling, weighted by how write-hot the CF is.
+///
+/// Fjall's global cross-keyspace write-buffer cap (`max_write_buffer_size`, the
+/// analogue of RocksDB's `db_write_buffer_size`) is `#[deprecated]`/off in 3.1.7,
+/// so an aggregate budget cannot be enforced there. Instead the budget is shaped
+/// here: the recall write-path CFs keep the full `base`; cold/rarely-written CFs
+/// take a quarter — so the SUM across all 17 keyspaces is an intentional number,
+/// not `base × keyspace_count` fallen out of the CF count.
+fn memtable_size_for(name: &str, base: u64) -> u64 {
+    let hot = matches!(
+        name,
+        keys::CF_DOCS
+            | keys::CF_VECS
+            | keys::CF_NVECS
+            | keys::CF_MVECS
+            | keys::CF_TERMS
+            | keys::CF_PIDX
+            | keys::CF_SPARSE
+            | keys::CF_TDF
+    );
+    if hot {
+        base
+    } else {
+        (base / 4).max(1)
+    }
 }
 
 /// Per-keyspace options mirroring the RocksDB backend's per-CF tuning
@@ -83,14 +139,35 @@ fn keyspace_options(name: &str, memtable_bytes: u64) -> KeyspaceCreateOptions {
         .max_memtable_size(memtable_bytes)
         .expect_point_read_hits(point_lookup)
         .filter_policy(filter)
-        .data_block_compression_policy(compression);
+        .data_block_compression_policy(compression)
+        // 16 KiB data blocks on every CF — the RocksDB backend's `set_block_size`,
+        // restored here so both backends cache at the same granularity.
+        .data_block_size_policy(BlockSizePolicy::all(DATA_BLOCK_SIZE));
+
+    // Pin filter + index blocks resident for the point-lookup CFs — the recall
+    // hot path. RocksDB did this with `cache_index_and_filter_blocks` +
+    // `pin_l0_filter_and_index_blocks_in_cache` (all CFs, L0); here it is applied
+    // where it pays — the CFs read by exact key — so their blooms/indexes are
+    // never evicted from under a burst of point reads. `PinningPolicy::all(true)`
+    // pins every level, not just L0. Range-scanned CFs keep Fjall's defaults.
+    if point_lookup {
+        opts = opts
+            .filter_block_pinning_policy(PinningPolicy::all(true))
+            .index_block_pinning_policy(PinningPolicy::all(true));
+    }
 
     // BlobDB → KV separation on the vector CFs: values above the threshold live
     // in a value log the LSM only references, so compaction moves pointers, not
-    // 10 KiB vectors. Same intent as the RocksDB BlobDB knob.
+    // 10 KiB vectors. Same intent as the RocksDB BlobDB knob. GC thresholds are
+    // set explicitly (at Fjall's sane defaults) rather than left implicit, the
+    // analogue of RocksDB's `set_enable_blob_gc(true)`: reclaim a value-log file
+    // once a third of it is stale.
     if is_vector {
         opts = opts.with_kv_separation(Some(
-            KvSeparationOptions::default().separation_threshold(KV_SEPARATION_THRESHOLD),
+            KvSeparationOptions::default()
+                .separation_threshold(KV_SEPARATION_THRESHOLD)
+                .staleness_threshold(0.33)
+                .age_cutoff(0.20),
         ));
     }
     opts
@@ -188,20 +265,37 @@ impl Db {
         // Each keyspace's memtable is capped below (`max_memtable_size`), so the
         // total write memory is bounded by that × the live keyspaces — the same
         // budget the RocksDB backend states explicitly via `db_write_buffer_size`.
+        let write_buffer_bytes = config.write_buffer_bytes as u64;
+        // The intentional aggregate memtable budget: the sum of the role-weighted
+        // per-keyspace ceilings (`memtable_size_for`). Fjall 3.1.7's global
+        // write-buffer cap is deprecated/off, so this shaped sum is the estate's
+        // stated write-memory budget instead of `write_buffer_bytes × 17`.
+        let memtable_budget: u64 = COLUMN_FAMILIES
+            .iter()
+            .map(|name| memtable_size_for(name, write_buffer_bytes))
+            .sum();
+
         let db = Database::builder(path)
             // One shared block/blob cache across keyspaces (RocksDB's shared LRU).
             .cache_size(config.block_cache_bytes as u64)
             // Background compaction/flush workers (RocksDB's `background_jobs`).
             .worker_threads(config.background_jobs.max(1))
+            // Bound the WAL/journal — it only needs to outlive the memtables it
+            // backs, so twice the memtable budget (never below Fjall's 512 MiB
+            // default) is the stated ceiling. RocksDB's `max_total_wal_size`.
+            .max_journaling_size(memtable_budget.saturating_mul(2).max(512 * 1024 * 1024))
             .open()
             .map_err(fjall_err)?;
 
-        let write_buffer_bytes = config.write_buffer_bytes as u64;
         let mut parts = std::collections::HashMap::with_capacity(COLUMN_FAMILIES.len());
         for name in COLUMN_FAMILIES {
             let name = *name;
+            // Each keyspace's memtable is sized by how write-hot it is, so the
+            // aggregate matches `memtable_budget` above.
             let ks = db
-                .keyspace(name, || keyspace_options(name, write_buffer_bytes))
+                .keyspace(name, || {
+                    keyspace_options(name, memtable_size_for(name, write_buffer_bytes))
+                })
                 .map_err(fjall_err)?;
             parts.insert(name, ks);
         }
@@ -317,9 +411,18 @@ impl Db {
         cf.ks.rotate_memtable_and_wait().map_err(fjall_err)
     }
 
-    /// Sync the journal (Fjall's write-ahead log) — RocksDB's `flush_wal`.
-    pub(crate) fn flush_wal(&self, _sync: bool) -> Result<()> {
-        self.0.db.persist(PersistMode::SyncAll).map_err(fjall_err)
+    /// Sync the journal (Fjall's write-ahead log) — RocksDB's `flush_wal(sync)`.
+    /// Honors the arg: `true` fsyncs the journal (`SyncData`), `false` flushes it
+    /// to the OS without an fsync (`Buffer`) — the same contract RocksDB's bool
+    /// carries. (`SyncData` rather than `SyncAll`: this is a WAL sync, not a full
+    /// data flush.)
+    pub(crate) fn flush_wal(&self, sync: bool) -> Result<()> {
+        let mode = if sync {
+            PersistMode::SyncData
+        } else {
+            PersistMode::Buffer
+        };
+        self.0.db.persist(mode).map_err(fjall_err)
     }
 
     /// Force a full compaction of `cf` — the operator-invoked optimizer pass,
@@ -340,6 +443,13 @@ impl Db {
     /// primitive, so this persists the journal and copies the database
     /// directory — callers snapshot at quiescent points (see `Estate`).
     pub(crate) fn snapshot_to(&self, path: &Path) -> Result<()> {
+        // Pin a consistent MVCC read view for the whole copy. While this snapshot
+        // is held, Fjall will not GC/compact away any segment it references, so
+        // `copy_dir_all` cannot race a compaction deleting a file mid-read.
+        // Combined with the caller quiescing the applier (`Estate::snapshot_to`),
+        // this is Fjall's closest equivalent to RocksDB's atomic checkpoint. The
+        // snapshot is a cheap seqno pin, released at end of scope.
+        let _snapshot = self.0.db.snapshot();
         self.0.db.persist(PersistMode::SyncAll).map_err(fjall_err)?;
         copy_dir_all(&self.0.path, path).map_err(|e| RroError::Recall(format!("snapshot: {e}")))
     }
