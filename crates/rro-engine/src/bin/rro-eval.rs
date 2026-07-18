@@ -402,6 +402,47 @@ async fn run() -> anyhow::Result<()> {
         );
         prev_ndcg = n;
     }
+
+    // ---- significance -------------------------------------------------------
+    // A mean without a confidence interval is a claim without evidence. Every arm
+    // scored the same queries, so the scores are paired: bootstrap each arm's CI,
+    // and test each step of the ladder (arm vs the one before it) with a paired
+    // sign-flip permutation test. This is what lets "dense beats BM25" or "fusion
+    // hurts" be stated as findings rather than impressions.
+    let iters = env_usize("RRO_EVAL_BOOTSTRAP", 10_000);
+    let seed = std::env::var("RRO_EVAL_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x00C0_FFEE);
+    println!("\n=== significance (paired, {iters} resamples, seed 0x{seed:X}) ===");
+    println!("{:<14} {:>9}  {:>20}", "arm", "nDCG@10", "95% CI");
+    for (name, ndcg, ..) in &arms {
+        let (lo, hi) = sig::bootstrap_ci(ndcg, iters, seed);
+        println!("{name:<14} {:>9.4}  [{lo:.4}, {hi:.4}]", mean(ndcg));
+    }
+    println!(
+        "\n{:<26} {:>9}  {:>20}  {:>8}",
+        "step (arm vs previous)", "Δ nDCG", "95% CI", "p"
+    );
+    for pair in arms.windows(2) {
+        let (base_name, base, ..) = &pair[0];
+        let (arm_name, arm, ..) = &pair[1];
+        let r = sig::paired(arm, base, iters, seed);
+        let verdict = if r.p < 0.05 { "" } else { "  (n.s.)" };
+        println!(
+            "{:<26} {:>+9.4}  [{:+.4}, {:+.4}]  {:>8.4}{verdict}",
+            format!("{arm_name} vs {base_name}"),
+            r.delta,
+            r.ci.0,
+            r.ci.1,
+            r.p
+        );
+    }
+    println!(
+        "\nA step marked (n.s.) is not statistically distinguishable at p<0.05 — its\n\
+         apparent lift or drop is within paired-resampling noise on these queries."
+    );
+
     println!(
         "\nNOTE: `wall ms/query` is END-TO-END and is dominated by MODEL time (an HTTP\n\
          round-trip + a forward pass, plus rerank pairs). It is NOT engine latency —\n\
@@ -418,6 +459,131 @@ fn mean(xs: &[f64]) -> f64 {
         0.0
     } else {
         xs.iter().sum::<f64>() / xs.len() as f64
+    }
+}
+
+/// Significance: turn per-query point estimates into defensible claims.
+///
+/// A single nDCG mean is a point estimate — "dense beats BM25" could be a real
+/// effect or per-query noise. Because every arm scores the SAME queries in the
+/// SAME order, the scores are **paired**, so two rigorous, distribution-free
+/// tools apply:
+///   - a **percentile bootstrap** 95% CI on each arm's mean (resample queries
+///     with replacement), and
+///   - a **paired sign-flip permutation test** on the per-query delta between two
+///     arms (the textbook exact-ish test for paired data): under H0 the sign of
+///     each query's delta is exchangeable, so flipping signs at random builds the
+///     null distribution of the mean delta.
+///
+/// Both are seeded (default 0xC0FFEE) so a published number reproduces exactly.
+mod sig {
+    /// SplitMix64 — a tiny, well-distributed, deterministic PRNG. No `rand` dep,
+    /// matching the tree; a fixed seed makes every CI and p-value reproducible.
+    pub struct Rng(u64);
+    impl Rng {
+        pub fn new(seed: u64) -> Self {
+            Rng(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        }
+        /// Uniform in `[0, n)`.
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+        /// A random sign, +1.0 or -1.0.
+        fn sign(&mut self) -> f64 {
+            if self.next_u64() & 1 == 0 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+    }
+
+    fn mean(xs: &[f64]) -> f64 {
+        xs.iter().sum::<f64>() / xs.len() as f64
+    }
+
+    fn percentile(sorted: &[f64], p: f64) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let idx = ((p * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1);
+        sorted[idx]
+    }
+
+    /// Percentile bootstrap 95% CI of the mean of `values`.
+    pub fn bootstrap_ci(values: &[f64], iters: usize, seed: u64) -> (f64, f64) {
+        if values.is_empty() {
+            return (0.0, 0.0);
+        }
+        let mut rng = Rng::new(seed);
+        let n = values.len();
+        let mut means: Vec<f64> = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let mut acc = 0.0;
+            for _ in 0..n {
+                acc += values[rng.below(n)];
+            }
+            means.push(acc / n as f64);
+        }
+        means.sort_by(f64::total_cmp);
+        (percentile(&means, 0.025), percentile(&means, 0.975))
+    }
+
+    /// The outcome of comparing two arms on the same queries.
+    pub struct Paired {
+        /// Mean per-query delta (a − b).
+        pub delta: f64,
+        /// 95% bootstrap CI of the mean delta.
+        pub ci: (f64, f64),
+        /// Two-sided p-value from the sign-flip permutation test.
+        pub p: f64,
+    }
+
+    /// Paired comparison of two equal-length, query-aligned score vectors.
+    /// CI by bootstrap of the mean delta; p by sign-flip permutation.
+    pub fn paired(a: &[f64], b: &[f64], iters: usize, seed: u64) -> Paired {
+        assert_eq!(a.len(), b.len(), "paired arms must be query-aligned");
+        let deltas: Vec<f64> = a.iter().zip(b).map(|(x, y)| x - y).collect();
+        let observed = mean(&deltas);
+
+        // Bootstrap CI of the mean delta.
+        let mut rng = Rng::new(seed);
+        let n = deltas.len();
+        let mut boot: Vec<f64> = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let mut acc = 0.0;
+            for _ in 0..n {
+                acc += deltas[rng.below(n)];
+            }
+            boot.push(acc / n as f64);
+        }
+        boot.sort_by(f64::total_cmp);
+        let ci = (percentile(&boot, 0.025), percentile(&boot, 0.975));
+
+        // Sign-flip permutation test: under H0 (no effect), each delta's sign is
+        // exchangeable. Count permutations whose |mean| ≥ |observed|.
+        let mut rng = Rng::new(seed ^ 0x5555_5555_5555_5555);
+        let mut extreme = 0usize;
+        for _ in 0..iters {
+            let m: f64 = deltas.iter().map(|d| d * rng.sign()).sum::<f64>() / n as f64;
+            if m.abs() >= observed.abs() {
+                extreme += 1;
+            }
+        }
+        // Add-one smoothing: a p-value is never exactly 0 from a finite sample.
+        let p = (extreme as f64 + 1.0) / (iters as f64 + 1.0);
+        Paired {
+            delta: observed,
+            ci,
+            p,
+        }
     }
 }
 
@@ -548,4 +714,81 @@ fn load_queries(dir: &Path, limit: usize) -> anyhow::Result<Vec<EvalQuery>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sig;
+
+    #[test]
+    fn bootstrap_ci_brackets_the_mean() {
+        let v: Vec<f64> = (0..100).map(|i| (i as f64) / 100.0).collect();
+        let m = v.iter().sum::<f64>() / v.len() as f64;
+        let (lo, hi) = sig::bootstrap_ci(&v, 5000, 0xC0FFEE);
+        assert!(lo < m && m < hi, "CI [{lo},{hi}] must bracket mean {m}");
+        assert!(hi - lo < 0.15, "CI width {} unexpectedly wide", hi - lo);
+    }
+
+    #[test]
+    fn identical_arms_are_not_significant() {
+        let a: Vec<f64> = (0..80).map(|i| ((i * 7) % 11) as f64 / 10.0).collect();
+        let r = sig::paired(&a, &a, 5000, 0xC0FFEE);
+        assert_eq!(r.delta, 0.0, "identical arms have zero delta");
+        assert!(
+            r.p > 0.99,
+            "identical arms cannot be significant, p={}",
+            r.p
+        );
+        assert!(
+            r.ci.0 <= 0.0 && r.ci.1 >= 0.0,
+            "CI must contain 0 for identical arms: {:?}",
+            r.ci
+        );
+    }
+
+    #[test]
+    fn a_consistent_per_query_lift_is_significant() {
+        // Arm A beats arm B on every query by ~0.1 (with a little jitter). A
+        // real, consistent effect must come back significant with a CI above 0.
+        let b: Vec<f64> = (0..60).map(|i| 0.3 + ((i % 5) as f64) * 0.02).collect();
+        let a: Vec<f64> = b
+            .iter()
+            .enumerate()
+            .map(|(i, x)| x + 0.10 + if i % 3 == 0 { 0.02 } else { -0.01 })
+            .collect();
+        let r = sig::paired(&a, &b, 10_000, 0xC0FFEE);
+        assert!(r.delta > 0.08, "delta {} should be ~0.1", r.delta);
+        assert!(
+            r.p < 0.01,
+            "a consistent lift must be significant, p={}",
+            r.p
+        );
+        assert!(r.ci.0 > 0.0, "95% CI {:?} must exclude 0", r.ci);
+    }
+
+    #[test]
+    fn pure_noise_is_not_significant() {
+        // Symmetric per-query differences with no real effect → mean ≈ 0, n.s.
+        let a: Vec<f64> = (0..80)
+            .map(|i| if i % 2 == 0 { 0.5 } else { 0.3 })
+            .collect();
+        let b: Vec<f64> = (0..80)
+            .map(|i| if i % 2 == 0 { 0.3 } else { 0.5 })
+            .collect();
+        let r = sig::paired(&a, &b, 10_000, 0xC0FFEE);
+        assert!(r.delta.abs() < 1e-9, "symmetric deltas cancel: {}", r.delta);
+        assert!(r.p > 0.05, "noise must be n.s., p={}", r.p);
+    }
+
+    #[test]
+    fn same_seed_reproduces_exactly() {
+        let a: Vec<f64> = (0..50).map(|i| (i as f64).sin().abs()).collect();
+        let b: Vec<f64> = (0..50).map(|i| (i as f64 * 1.3).cos().abs()).collect();
+        let r1 = sig::paired(&a, &b, 3000, 42);
+        let r2 = sig::paired(&a, &b, 3000, 42);
+        assert_eq!(r1.p, r2.p, "same seed → same p");
+        assert_eq!(r1.ci, r2.ci, "same seed → same CI");
+        let r3 = sig::paired(&a, &b, 3000, 43);
+        assert!(r3.ci.0.is_finite());
+    }
 }
