@@ -198,7 +198,13 @@ async fn answer(stream: TcpStream, node: Arc<FlowNode>) -> std::io::Result<()> {
     } else {
         "200 OK"
     };
-    respond(&mut write_half, status, "application/json", reply.to_string()).await
+    respond(
+        &mut write_half,
+        status,
+        "application/json",
+        reply.to_string(),
+    )
+    .await
 }
 
 /// The route table. Kept separate so the HTTP method/path → a2a verb mapping is

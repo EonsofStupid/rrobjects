@@ -85,10 +85,7 @@ async fn post_query_equals_a2a_query_and_direct_recall() {
 
     // 2) a2a `query` verb (typed client).
     let (a2a_addr, _a2a) = tcp::serve("127.0.0.1:0", node.clone()).await.unwrap();
-    let a2a = Client::new(a2a_addr.to_string())
-        .query(&q)
-        .await
-        .unwrap();
+    let a2a = Client::new(a2a_addr.to_string()).query(&q).await.unwrap();
     let a2a_json = serde_json::to_value(&a2a).unwrap();
 
     // 3) HTTP `POST /query`.
@@ -158,11 +155,7 @@ async fn post_ask_returns_the_full_pass() {
 async fn doorway_carries_the_bearer_token_into_the_same_gate() {
     let dir = tempfile::tempdir().unwrap();
     let estate = Arc::new(connxism::Estate::open(dir.path(), "g").unwrap());
-    estate
-        .recall()
-        .upsert(vec![rec("a", 0.1)])
-        .await
-        .unwrap();
+    estate.recall().upsert(vec![rec("a", 0.1)]).await.unwrap();
     estate.recall().quiesce().await.unwrap();
     let flow = Arc::new(ReasonReadyObject::default_engine());
     let node = Arc::new(
