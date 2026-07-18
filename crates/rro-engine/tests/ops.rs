@@ -126,8 +126,15 @@ async fn issues_report_planted_backlog() {
     // Threshold 0 → an empty queue reports nothing; so instead assert the
     // report fires exactly when the snapshot shows backlog, and clears
     // after quiesce.
-    let before = estate.health().unwrap().applier_backlog;
+    //
+    // Read the issues snapshot BEFORE the backlog snapshot. No writes follow the
+    // upsert, so the applier only drains — backlog is monotonically
+    // non-increasing. Reading issues first (earlier) then backlog (later) means
+    // `before > 0` implies the earlier snapshot had at least that much backlog,
+    // so the issue must be present. The reverse order races: the applier could
+    // drain between the two reads, leaving `before > 0` but an empty issues list.
     let issues_before = estate.issues(0).unwrap();
+    let before = estate.health().unwrap().applier_backlog;
     if before > 0 {
         assert!(issues_before.iter().any(|i| i.code == "applier_backlog"));
     }
